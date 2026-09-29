@@ -19,6 +19,10 @@ paths:
         schema:
           type: string
       - in: query
+        name: exportable
+        schema:
+          type: boolean
+      - in: query
         name: grade
         schema:
           type: string
@@ -101,6 +105,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/Delivery'
           description: 'Replay: this client_reference was already recorded.'
+        '409':
+          description: client_reference reused with a different body.
   /api/deliveries/{id}/:
     get:
       operationId: deliveries_retrieve
@@ -222,6 +228,10 @@ paths:
         description: Number of results to return per page.
         schema:
           type: integer
+      - in: query
+        name: requires_manual_review
+        schema:
+          type: boolean
       - in: query
         name: risk_status
         schema:
@@ -408,6 +418,10 @@ paths:
         description: The pagination cursor value.
         schema:
           type: string
+      - in: query
+        name: exportable
+        schema:
+          type: boolean
       - in: query
         name: grade
         schema:

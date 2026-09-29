@@ -112,6 +112,7 @@ it from `.env.example`.
 | `RISK_REGISTRY_FAILURE_RATE` | `0.2` | Simulated registry: chance a call fails with 503. `1.0` forces an outage. |
 | `RISK_REGISTRY_FLAG_RATE` | `0.1` | Simulated registry: chance a successful check returns `flagged` |
 | `RISK_CHECK_MAX_RETRIES` | `8` | Retries before a plot becomes `unverified` |
+| `RISK_CHECK_BACKOFF_SECONDS` | `60` | Backoff base: retry *n* waits random(0, min(base × 2ⁿ, 3600)) s, so up to about 3 h in total |
 | `RISK_CHECK_STALE_HOURS` | `6` | The sweeper re-enqueues pending/unverified plots with no attempt in this window |
 | `RISK_CHECK_MANUAL_REVIEW_DAYS` | `7` | After this many days `unverified`, `requires_manual_review` becomes `true` |
 | `RISK_CHECK_SWEEP_MINUTES` | `15` | How often beat runs `requeue_stale_risk_checks` |
@@ -140,11 +141,14 @@ To run everything in containers instead (web, worker, beat and Redis):
 To watch the retry path, restart the worker with a forced outage:
 
 ```bash
-RISK_REGISTRY_FAILURE_RATE=1.0 RISK_REGISTRY_MAX_LATENCY=1 celery -A config worker -l info
+RISK_REGISTRY_FAILURE_RATE=1.0 RISK_REGISTRY_MAX_LATENCY=1 RISK_CHECK_BACKOFF_SECONDS=1 \
+  celery -A config worker -l info
 ```
 
 Register a plot, then read `GET /api/plots/{id}/risk-checks/`. You will see one `error` attempt per
-retry, spaced out by exponential backoff, and after 9 attempts the plot turns `unverified`.
+retry, spaced out by exponential backoff, and after 9 attempts (about 4 minutes with a 1-second
+base) the plot turns `unverified`. With the production default of 60 seconds, the same chain spans
+up to about 3 hours, which is long enough to ride out a typical registry outage.
 
 **If Redis is down,** `POST /api/plots/` still returns `201` in well under a second. The failed
 enqueue is logged as `risk_check.enqueue_failed`, the plot stays `pending`, and the beat sweeper
@@ -153,8 +157,9 @@ queues it once the broker is back. (Measured locally: 0.49 s with no Redis runni
 ## Tests and quality checks
 
 ```bash
-python -m pytest -q                                   # 78 tests
+python -m pytest -q                                   # 90 tests
 ruff check .                                          # lint
+mypy apps config manage.py                            # static types (django-stubs, drf-stubs)
 python manage.py check
 python manage.py spectacular --file schema.yml --validate   # regenerate + validate OpenAPI
 ```
@@ -166,14 +171,14 @@ registry client is mocked. What the suite covers:
 |---|---|
 | The exact F1 contract payloads and list envelopes | `tests/test_contract.py` |
 | Farmer phone normalisation and validation errors | `tests/test_farmers.py` |
-| Plot is `201` + `pending`, enqueued **on commit**, registry **not** called inline, broker outage tolerated, filters, validation errors | `tests/test_plots.py` |
-| Price and risk snapshots, idempotent replay (`200`, same id), exportability policy, validation errors | `tests/test_deliveries.py` |
-| Cursor pagination shape, `next` link, stability under inserts, query count, `since`/grade/risk filters | `tests/test_feed.py` |
-| Task success, retries, exhaustion → `unverified`, idempotency, sweeper, simulated registry | `tests/test_risk_checks.py` |
+| Plot is `201` + `pending`, enqueued **on commit**, registry **not** called inline, broker outage tolerated, filters, manual-review queue, validation errors | `tests/test_plots.py` |
+| Price and risk snapshots, idempotent replay (`200`, same id), replay with a different body (`409`), exportability policy, validation errors | `tests/test_deliveries.py` |
+| Cursor pagination shape, `next` link, stability under inserts, query count, `EXPLAIN` uses the composite index, `since`/grade/risk/exportable filters | `tests/test_feed.py` |
+| Task success, retries, capped backoff (3 h worst case), soft time limit → `timeout` + retry, exhaustion → `unverified`, unique attempt numbers, idempotency, sweeper (including abandoned attempts), simulated registry | `tests/test_risk_checks.py` |
 | Price-schedule shape and cache header, one-active-schedule constraint, error envelope (400/404/405) | `tests/test_pricing_and_errors.py` |
 
-CI (`.github/workflows/ci.yml`) runs ruff, `check`, the migration check, schema freshness and pytest
-on every push to `main`.
+CI (`.github/workflows/ci.yml`) runs ruff, mypy, `check`, the migration check, schema freshness and
+pytest on every push to `main`.
 
 ## API reference with curl examples
 
@@ -237,7 +242,10 @@ curl -s -X POST http://127.0.0.1:8000/api/plots/ -H 'Content-Type: application/j
  "requires_manual_review": false, "created_at": "2026-09-29T20:31:35.170000+02:00"}
 ```
 
-### List plots (filters: `farmer`, `sector`, `washing_station`, `risk_status`)
+### List plots (filters: `farmer`, `sector`, `washing_station`, `risk_status`, `requires_manual_review`)
+
+`GET /api/plots/?requires_manual_review=true` is compliance's review queue: plots still
+`unverified` after `RISK_CHECK_MANUAL_REVIEW_DAYS`.
 
 ```bash
 curl -s 'http://127.0.0.1:8000/api/plots/?risk_status=pending&page_size=1'
@@ -295,6 +303,16 @@ Idempotent-Replayed: true
 {"id": 46, "client_reference": "nyr-phone-02-0040", "amount_due_rwf": "26980.00", "...": "..."}
 ```
 
+**Reusing a `client_reference` with different values** (a phone bug, not a retry) is refused, so
+the phone is never told a wrong delivery was saved:
+
+```json
+HTTP/1.1 409 Conflict
+{"error": {"code": "conflict",
+  "message": "client_reference 'nyr-phone-02-0040' was already used for delivery 46 with different values.",
+  "details": {"delivery_id": 46, "mismatched_fields": ["weight_kg"]}}}
+```
+
 ### Error responses
 
 Every error uses one envelope: `{"error": {"code", "message", "details"}}`.
@@ -322,19 +340,22 @@ Once the field errors are fixed, cross-field rules run:
 | 400 | `parse_error` | Malformed JSON |
 | 404 | `not_found` | Unknown id or route, e.g. `{"error": {"code": "not_found", "message": "No Farmer matches the given query.", "details": {}}}` |
 | 405 | `method_not_allowed` | e.g. `DELETE /api/price-schedule/` |
-| 409 | `conflict` | Two requests raced past validation into a DB uniqueness constraint |
+| 409 | `conflict` | A `client_reference` was reused with a different body (`details.mismatched_fields`), or two requests raced past validation into a DB uniqueness constraint |
 | 500 | `server_error` | Unexpected failure. The traceback is logged, never returned. |
 
 Why duplicates are **400**, not 409: a duplicate phone, member number or plot code that validation
 can see is reported against the specific field, so the phone app can highlight it. A **409** is
-reserved for the rare race where the database constraint, not the serializer, catches the
-duplicate. A duplicate `client_reference` is neither: it is an idempotent replay (`200`).
+reserved for real conflicts with existing data: the rare race where the database constraint, not
+the serializer, catches a duplicate, and a `client_reference` reused with different values. An
+identical resend under the same `client_reference` is neither: it is an idempotent replay (`200`).
 
 ### Station delivery feed (cursor-paginated)
 
 `GET /api/deliveries/` and `GET /api/stations/{id}/deliveries/` return the same slim rows, newest
 first. Filters: `washing_station` (name, on `/api/deliveries/`), `grade`, `risk_status` (the plot's
-*current* status), and `since` (ISO datetime, strictly newer than `recorded_at`). Use `page_size`
+*current* status), `exportable` (`true`/`false`), and `since` (ISO datetime, strictly newer than
+`recorded_at`). Compliance's review list of paid-but-flagged cherry is
+`?exportable=false&risk_status=flagged`. Use `page_size`
 to change the page length (default 20, maximum 100).
 
 ```bash
@@ -357,8 +378,11 @@ curl -s 'http://127.0.0.1:8000/api/stations/1/deliveries/?page_size=2'
 }
 ```
 
-Follow `next` exactly as given; the cursor is opaque. To poll for new rows only:
-`/api/stations/1/deliveries/?since=2026-09-29T20:33:57.340481%2B02:00`.
+Follow `next` exactly as given; the cursor is opaque. To poll for new rows only, pass the newest
+`recorded_at` the phone holds **minus a 2-minute overlap**, and de-duplicate by `id`:
+`/api/stations/1/deliveries/?since=2026-09-29T20:31:57%2B02:00`. The overlap covers deliveries
+whose write committed slightly after a newer one (`recorded_at` is stamped at write time, not
+commit time), so a slow transaction can never be skipped. See ADR-002.
 
 ### Price schedule
 
@@ -395,8 +419,21 @@ read from the database when each delivery is recorded.
   grows. A cursor (`WHERE (recorded_at, id) < last seen … LIMIT 20`) is stable under inserts and
   costs the same on page 1 and page 500. `test_cursor_is_stable_when_new_rows_arrive_between_pages`
   proves the stability.
-- **Index.** The composite index `Delivery(washing_station, -recorded_at, -id)` matches the feed's
-  `WHERE` and `ORDER BY` exactly (`apps/deliveries/models.py`).
+- **Index, verified with `EXPLAIN`.** The composite index
+  `Delivery(washing_station, -recorded_at, -id)` matches the feed's `WHERE` and `ORDER BY`
+  (`apps/deliveries/models.py`). SQLite's plan for a later page of the station feed:
+
+  ```
+  SEARCH deliveries_delivery USING INDEX delivery_station_feed_idx (washing_station_id=? AND recorded_at<?)
+  SEARCH registry_plot USING INTEGER PRIMARY KEY (rowid=?)
+  SEARCH registry_farmer USING INTEGER PRIMARY KEY (rowid=?)
+  SEARCH registry_washingstation USING INTEGER PRIMARY KEY (rowid=?)
+  ```
+
+  This is an index range scan with no `USE TEMP B-TREE FOR ORDER BY`, so there is no sort, and the
+  joins are primary-key lookups. `test_station_feed_query_uses_composite_index` fails if the plan
+  ever regresses. To reproduce:
+  `python manage.py shell -c "from apps.deliveries.services import feed_queryset; print(feed_queryset().filter(washing_station_id=1)[:21].explain())"`
 - **No N+1.** `select_related("plot__farmer", "washing_station")` makes each page **one SQL query**
   (two for the station route, including the station lookup that returns 404). Tests assert this
   with `django_assert_num_queries`.
@@ -430,8 +467,12 @@ Other decisions worth knowing:
   range on deliveries, one active price schedule per season, one price per grade per schedule, and
   `client_reference` unique per station.
 - **Idempotency:** a replay is detected before validation, so a retry returns the original even if
-  prices have changed since. A race between two identical requests is caught by the unique
-  constraint and also returns the original.
+  prices have changed since. The replayed body must match the original (plot, weight, grade and
+  date), otherwise the response is `409`. A race between two identical requests is caught by the
+  unique constraint and also returns the original.
+- **Personal data (known F1 limitation):** `national_id` and `phone` are returned in full because
+  F1 has no authentication yet. Formative 2 adds roles, masks national IDs to their last four
+  digits for field agents, and hides them from exporters and auditors (see `F2_CONTRACT.md`).
 
 ## AI-use disclosure
 

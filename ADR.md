@@ -52,16 +52,27 @@ Concretely:
      duration, outcome (`clear | flagged | error | timeout`), error message and Celery task id.
      This table is the audit trail showing the retries really happened.
    - Transient failures (`RegistryUnavailable`, `RegistryTimeout`) are retried with exponential
-     backoff and full jitter (`retry_backoff=True`, `retry_backoff_max=3600`, `retry_jitter=True`,
-     `max_retries=8`). This spreads roughly 4 hours of retries across the fleet instead of
-     hammering a registry that is already down.
+     backoff and full jitter (`retry_backoff=60`, `retry_backoff_max=3600`, `retry_jitter=True`,
+     `max_retries=8`). The wait before retry *n* is random between 0 and
+     `min(60 × 2ⁿ, 3600)` seconds: up to 1, 2, 4, 8, 16, 32, 60 and 60 minutes. The worst case
+     is 10,980 s (about **3 hours**) and the average is about half that. Random spacing stops
+     hundreds of plots registered during the same outage from retrying at the same instant.
+     `test_retry_schedule_spans_hours_not_minutes` pins this arithmetic.
+   - A registry call that ignores its own timeout is stopped by the task's soft time limit. It is
+     recorded as a `timeout` attempt and retried like any other timeout.
+   - Attempt numbers are allocated under a row lock on the plot and are unique per plot (DB
+     constraint), so the audit trail cannot contain two "attempt 3"s.
    - The task is idempotent. If the plot is already `clear` or `flagged`, it does nothing, so a
      redelivered message (`acks_late=True`) or a duplicate enqueue is harmless.
    - When the retries run out, the plot becomes `unverified` and a warning is logged.
 3. A Celery beat job, `requeue_stale_risk_checks`, runs every 15 minutes. It re-enqueues plots
    that have been `pending` or `unverified` for more than `RISK_CHECK_STALE_HOURS` (6 hours) with
-   no recent attempt. An outage longer than the retry budget therefore recovers without a person
-   stepping in. The same job also catches plots whose enqueue failed because Redis was down.
+   no recent attempt. The 6-hour window is longer than the whole retry chain, so the sweeper
+   never competes with a chain that is still running. An outage longer than the retry budget
+   therefore recovers without a person stepping in. The same job also catches plots whose enqueue
+   failed because Redis was down. It also closes attempts left `running` by a worker that was
+   killed mid-call, recording them as errors, so the history never claims a call is still in
+   progress.
 4. `POST /api/deliveries/` accepts cherry from a plot **whatever its risk status**. The
    delivery records the plot, which is the provenance link. It also snapshots:
    - `unit_price_rwf` and `amount_due_rwf`, from the price schedule active at recording time
@@ -127,17 +138,18 @@ not answer.
 - **We will pay for cherry we may not be able to export.** If a plot is later `flagged`, the
   cooperative has already paid for its cherry. This is a deliberate business trade-off (see the
   policy below).
-- **Duplicate registry calls are possible** in rare races, for example a sweeper requeue that
-  overlaps a late retry. They are harmless, because the task skips settled plots, but they cost
-  registry quota.
+- **Duplicate registry calls are still possible**, for example when a worker dies after calling the
+  registry but before acknowledging the message (`acks_late` redelivers it). They are harmless,
+  because the task skips settled plots and attempt numbers stay unique, but they cost registry
+  quota.
 
 ## Stakeholder impact
 
 | Stakeholder | Impact |
 |---|---|
 | **Jeanne** (farmer liaison) | **Benefits most.** Deliveries are never refused because of the registry, and pay is priced and snapshotted at the scale, so the same-day pay rule holds even during a registry outage. |
-| **Emmanuel** (station manager) | Plot registration and deliveries return immediately on 2G. Safe retries (`client_reference`) mean a dropped connection never creates a double delivery. He can filter his feed by `risk_status` to see which deliveries still need a verdict. |
-| **Patrick** (compliance/export) | Gets a clear rule (only currently `clear` plots are exportable), a per-delivery snapshot, and a full attempt history. In return, he has to manage a review queue for `flagged` plots and long-`unverified` ones. |
+| **Emmanuel** (station manager) | Plot registration and deliveries return immediately on 2G. Safe retries (`client_reference`) mean a dropped connection never creates a double delivery, and a reused reference with different values is refused (`409`) rather than silently answered with the wrong delivery. He can filter his feed by `risk_status` or `exportable` to see which deliveries still need a verdict. |
+| **Patrick** (compliance/export) | Gets a clear rule (only currently `clear` plots are exportable), a per-delivery snapshot, a full attempt history, and two ready-made review queues: `GET /api/plots/?requires_manual_review=true` and `GET /api/deliveries/?exportable=false&risk_status=flagged`. In return, working those queues is now his team's job. |
 
 ## Non-functional requirements
 
@@ -160,14 +172,15 @@ Some registry checks will fail for a very long time, or permanently. The policy 
    traceability exports. `is_exportable` is `false` until the plot becomes `clear`, and then it
    flips to `true` for all of that plot's deliveries.
 4. **Flagged plots:** deliveries are still recorded and paid. The cherry is physically there, and
-   Jeanne's rule is same-day pay. These deliveries are marked non-exportable and surfaced for
-   review (`GET /api/deliveries/?risk_status=flagged`).
+   Jeanne's rule is same-day pay. These deliveries are non-exportable, and compliance reviews them
+   through `GET /api/deliveries/?exportable=false&risk_status=flagged` (for example, to decide
+   whether the cherry is sold on the non-certified market).
 5. **Retries continue after `unverified`.** `unverified` means "no answer", not a verdict. The
    beat sweeper keeps re-enqueuing the check every `RISK_CHECK_STALE_HOURS`.
 6. **Manual review after N days.** A plot still `unverified` after
-   `RISK_CHECK_MANUAL_REVIEW_DAYS` (default 7) shows `requires_manual_review: true`. Compliance
-   then checks it by hand (site visit or an alternative data source) before its cherry can enter
-   an export lot.
+   `RISK_CHECK_MANUAL_REVIEW_DAYS` (default 7) shows `requires_manual_review: true` and appears
+   in the queue `GET /api/plots/?requires_manual_review=true`. Compliance then checks it by hand
+   (site visit or an alternative data source) before its cherry can enter an export lot.
 
 ---
 
@@ -219,5 +232,15 @@ visible to the next request and to every client within 60 seconds.
 - The feed has no total count and no "jump to page 7". Station staff scroll newest-first and never
   need either, and skipping `COUNT(*)` is part of the saving.
 - The cursor is opaque, so clients must follow the `next` link rather than build URLs themselves.
+- **`?since=` has a small blind spot.** `recorded_at` is stamped when the row is written, not when
+  its transaction commits. A delivery whose write is slow can therefore become visible with a
+  timestamp slightly *older* than one the phone has already seen, and a strict `since` poll would
+  skip it. Clients poll with a 2-minute overlap (`since = newest recorded_at − 120 s`) and
+  de-duplicate by `id`. The cost is a few repeated rows per poll, which is far cheaper than a
+  missing payment line. A server-side sequence assigned at commit would remove the blind spot
+  entirely; it is deferred until the feed has more than one writer per station.
+- **The index is proven, not assumed.** `EXPLAIN` on the feed query shows
+  `SEARCH deliveries_delivery USING INDEX delivery_station_feed_idx (washing_station_id=? AND recorded_at<?)`
+  with no sort step, and `test_station_feed_query_uses_composite_index` fails if that regresses.
 - If the price schedule ever becomes a hot path, a server-side cache can be added then, with
   invalidation on save. We have deferred it on purpose.
