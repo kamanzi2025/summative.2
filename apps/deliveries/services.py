@@ -2,7 +2,7 @@
 
 import logging
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -32,6 +32,29 @@ def find_replay(washing_station: Any, client_reference: Any) -> Delivery | None:
         .filter(washing_station__name__iexact=washing_station.strip(), client_reference=client_reference.strip())
         .first()
     )
+
+
+def replay_mismatches(original: Delivery, data: dict[str, Any]) -> list[str]:
+    """Fields where a replayed request disagrees with the delivery already recorded.
+
+    A genuine 2G retry resends the identical body. A different body under the same key is a
+    client bug (e.g. a reused reference) and must not be silently answered with someone else's
+    delivery.
+    """
+    try:
+        weight = Decimal(str(data.get("weight_kg")))
+    except InvalidOperation:
+        weight = None
+    mismatched = []
+    if str(data.get("plot")) != str(original.plot_id):
+        mismatched.append("plot")
+    if weight != original.weight_kg:
+        mismatched.append("weight_kg")
+    if data.get("grade") != original.grade:
+        mismatched.append("grade")
+    if data.get("delivered_on") not in (None, original.delivered_on.isoformat()):
+        mismatched.append("delivered_on")
+    return mismatched
 
 
 def record_delivery(

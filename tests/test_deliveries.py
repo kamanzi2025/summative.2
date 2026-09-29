@@ -106,3 +106,23 @@ def test_delivered_on_defaults_to_today(api, delivery_payload):
     del delivery_payload["delivered_on"]
     body = api.post("/api/deliveries/", delivery_payload, format="json").json()
     assert body["delivered_on"] == timezone.localdate().isoformat()
+
+
+def test_replay_with_different_body_is_a_conflict(api, delivery_payload):
+    delivery_payload["client_reference"] = "phone-7f3a-0002"
+    original = api.post("/api/deliveries/", delivery_payload, format="json").json()
+    reused = {**delivery_payload, "weight_kg": "41.0", "grade": "B"}
+    response = api.post("/api/deliveries/", reused, format="json")
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "conflict"
+    assert error["details"] == {"delivery_id": original["id"], "mismatched_fields": ["weight_kg", "grade"]}
+    assert Delivery.objects.count() == 1
+
+
+def test_replay_matches_equivalent_decimal_forms(api, delivery_payload):
+    delivery_payload["client_reference"] = "phone-7f3a-0003"
+    first = api.post("/api/deliveries/", delivery_payload, format="json").json()
+    replay = api.post("/api/deliveries/", {**delivery_payload, "weight_kg": "38.50"}, format="json")
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first["id"]

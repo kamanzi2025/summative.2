@@ -19,11 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 class Conflict(exceptions.APIException):
-    """A write lost a race against a uniqueness rule (e.g. two phones registering one farmer)."""
+    """The request contradicts existing data: a write that raced past validation into a uniqueness
+    constraint, or an idempotency key reused with a different body."""
 
     status_code = status.HTTP_409_CONFLICT
     default_detail = "The request conflicts with existing data."
     default_code = "conflict"
+
+    def __init__(self, detail: str | None = None, details: dict[str, Any] | None = None) -> None:
+        super().__init__(detail)
+        self.details = details or {}
 
 
 def error_body(code: str, message: str, details: Any | None = None) -> dict[str, Any]:
@@ -60,5 +65,5 @@ def kawa_exception_handler(exc: Exception, context: dict[str, Any]) -> Response:
         if isinstance(exc, exceptions.APIException):
             codes = exc.get_codes()
             code = codes if isinstance(codes, str) else code
-        response.data = error_body(code, str(detail))
+        response.data = error_body(code, str(detail), getattr(exc, "details", None))
     return response

@@ -6,6 +6,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.serializers import BaseSerializer
 
+from apps.core.exceptions import Conflict
 from apps.core.pagination import DeliveryFeedPagination
 from apps.registry.models import WashingStation
 
@@ -33,12 +34,20 @@ class DeliveryViewSet(
         responses={
             201: DeliverySerializer,
             200: OpenApiResponse(DeliverySerializer, description="Replay: this client_reference was already recorded."),
+            409: OpenApiResponse(description="client_reference reused with a different body."),
         }
     )
     def create(self, request: Request, *args: object, **kwargs: object) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         replay = services.find_replay(data.get("washing_station"), data.get("client_reference"))
         if replay is not None:
+            mismatched = services.replay_mismatches(replay, data)
+            if mismatched:
+                raise Conflict(
+                    f"client_reference {replay.client_reference!r} was already used for delivery {replay.pk} "
+                    "with different values.",
+                    details={"delivery_id": replay.pk, "mismatched_fields": mismatched},
+                )
             return self._respond(replay, created=False)
 
         serializer = self.get_serializer(data=request.data)
