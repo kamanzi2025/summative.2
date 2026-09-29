@@ -18,7 +18,7 @@ environ.Env.read_env(BASE_DIR / ".env", overwrite=False)
 
 SECRET_KEY: str = env("SECRET_KEY", default="django-insecure-local-dev-only-change-me")
 DEBUG: bool = env.bool("DEBUG", default=False)
-ALLOWED_HOSTS: list[str] = env.list("ALLOWED_HOSTS", default=["127.0.0.1", "localhost"])
+ALLOWED_HOSTS: list[str] = env.list("ALLOWED_HOSTS", default=["127.0.0.1", "localhost", "testserver"])
 
 INSTALLED_APPS = [
     "django.contrib.admin",
