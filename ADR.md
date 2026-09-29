@@ -19,20 +19,24 @@ The registry does not behave like a local service:
 - It has **outages that last hours**, not seconds.
 - We do not control it, and we cannot make it faster.
 
-Meanwhile, the people using our API work under tight constraints:
+Harvest starts in three weeks, and Emmanuel's station at Nyaruguru is the pilot. Three
+stakeholders pull in different directions:
 
-- **Jeanne (farmer liaison, farmer-facing):** farmers must be **paid the same day** they deliver.
-  A farmer who walks cherry to the scale cannot be told to come back when a server in another
-  country answers. Cherry also starts to ferment within hours, so it cannot wait either.
-- **Emmanuel (station manager, Nyaruguru):** registers plots and records deliveries from a phone
-  on a **2G connection**, where a request that hangs for 40 seconds usually fails and gets retried.
-  During the harvest peak his station records around **400 deliveries a day**.
-- **Patrick (compliance/export):** needs a reliable, auditable answer to "which lots can we sell as
-  deforestation-free?" and a record of what was known when each delivery was accepted.
+- **Emmanuel** wants to **record a delivery in seconds on a bad connection**. At harvest peak his
+  station takes about **400 deliveries a day**, entered on a phone over **2G** with a queue of
+  farmers watching. He cannot hold a farmer at the weighing scale while the registry thinks, and
+  on 2G a request that hangs for 40 seconds usually fails and gets retried.
+- **Jeanne** wants **every farmer paid correctly, the same day they deliver**. A farmer who carries
+  cherry to the scale cannot be told to come back when a server elsewhere answers, and the cherry
+  itself starts to ferment within hours.
+- **Patrick** wants **traceability data flowing to buyers before the shipping window closes**.
+  Buyers need each lot traced to its plot and that plot shown not to sit on recently cleared land,
+  and the registry's verdict is the evidence.
 
 The obvious design is to call the registry while the plot is being registered and refuse
-deliveries until the plot is cleared. That puts a slow, unreliable third party directly in the
-path of a farmer being paid.
+deliveries until the plot is cleared. That puts a slow, unreliable third party at the weighing
+scale, which is Emmanuel's queue and Jeanne's payday. It does not even help Patrick: the verdict
+arrives no sooner, while deliveries stall behind it.
 
 ## Decision
 
@@ -98,7 +102,7 @@ Call the registry inside `POST /api/plots/` and return the verdict in the respon
 
 Check asynchronously, but reject `POST /api/deliveries/` while the plot is not `clear`.
 
-- This breaks Jeanne's hard rule of same-day pay. During a multi-hour outage, every new plot's
+- This breaks Jeanne's requirement of same-day pay. During a multi-hour outage, every new plot's
   farmer would be turned away at the scale, and the cherry would spoil.
 - It pushes stations to work around the system (paper records, recording cherry against someone
   else's cleared plot). That destroys the traceability the check exists to protect.
@@ -121,8 +125,9 @@ not answer.
   registry being up.
 - Farmers are always paid the same day, at the price in force that day. Later price changes never
   rewrite what a farmer was owed.
-- Every delivery keeps its provenance chain (delivery → plot → farmer) and a snapshot of the risk
-  status at the time it was accepted, so Patrick can audit exactly what was known when.
+- Every delivery keeps its provenance chain (delivery → plot → farmer, sector and station) from the
+  first day of harvest, with a snapshot of the risk status at the time it was accepted. When
+  Patrick sends data to buyers, it is complete and shows exactly what was known when.
 - Each retry leaves evidence in `RiskCheckAttempt`, and `GET /api/plots/{id}/risk-checks/`
   exposes it.
 - Outages recover on their own through backoff, then the stale-check sweeper.
@@ -135,6 +140,17 @@ not answer.
 - **Eventual consistency.** A plot's status can be `pending` for minutes, or for hours during an
   outage. Every consumer of plot data must treat `pending` and `unverified` as "not yet known",
   never as "OK".
+- **Patrick carries the cost of registry outages.** A plot that is still `pending` or `unverified`
+  cannot contribute to an export lot, so a long outage just before the shipping window can hold
+  back traceability data he needs. We limit this rather than eliminate it:
+  - **Register plots before harvest.** Plots can be registered in the three weeks before harvest
+    starts, so their checks can finish (with up to about 3 hours of retries, plus the sweeper)
+    before the first delivery arrives. Only plots first seen at the scale depend on the registry
+    during harvest.
+  - Nothing has to be re-entered. When a plot clears, all of its earlier deliveries become
+    exportable automatically.
+  - Stuck plots are visible early (`?requires_manual_review=true`), not discovered the week the
+    ship leaves.
 - **We will pay for cherry we may not be able to export.** If a plot is later `flagged`, the
   cooperative has already paid for its cherry. This is a deliberate business trade-off (see the
   policy below).
@@ -145,11 +161,16 @@ not answer.
 
 ## Stakeholder impact
 
-| Stakeholder | Impact |
-|---|---|
-| **Jeanne** (farmer liaison) | **Benefits most.** Deliveries are never refused because of the registry, and pay is priced and snapshotted at the scale, so the same-day pay rule holds even during a registry outage. |
-| **Emmanuel** (station manager) | Plot registration and deliveries return immediately on 2G. Safe retries (`client_reference`) mean a dropped connection never creates a double delivery, and a reused reference with different values is refused (`409`) rather than silently answered with the wrong delivery. He can filter his feed by `risk_status` or `exportable` to see which deliveries still need a verdict. |
-| **Patrick** (compliance/export) | Gets a clear rule (only currently `clear` plots are exportable), a per-delivery snapshot, a full attempt history, and two ready-made review queues: `GET /api/plots/?requires_manual_review=true` and `GET /api/deliveries/?exportable=false&risk_status=flagged`. In return, working those queues is now his team's job. |
+| Stakeholder | Wants (from the brief) | Impact of this decision |
+|---|---|---|
+| **Emmanuel** | To record a delivery in seconds on a bad connection | **Benefits most.** The decision removes the registry from the one moment he cannot afford to wait: the farmer at the scale. Registration and deliveries return in milliseconds on 2G. Safe retries (`client_reference`) mean a dropped connection never creates a double delivery, and a reused reference with different values is refused (`409`) rather than silently answered with the wrong delivery. |
+| **Jeanne** | Every farmer paid correctly, the same day | **Benefits strongly.** No delivery is ever refused or delayed because of the registry, and the price is snapshotted when the delivery is recorded, so same-day pay is correct even if prices change later or the registry is down all day. |
+| **Patrick** | Traceability data flowing to buyers before the shipping window closes | **Mixed. He pays the main cost.** Provenance is complete from the first delivery, and cleared plots flow straight into exportable data. But cherry from unchecked plots is held back until the registry answers. The mitigations above (pre-harvest registration, automatic release when a plot clears, and review queues for stuck and flagged plots) exist to keep that delay away from the shipping window. |
+
+**Why Emmanuel over Jeanne:** the brief places the registry problem at Emmanuel's scale ("Emmanuel
+cannot hold a farmer at the weighing scale while it runs"), and that is exactly the step this
+decision unblocks. Jeanne's same-day pay depends on that step too, but she also relies on the
+price snapshot, which is a separate design choice.
 
 ## Non-functional requirements
 
@@ -172,15 +193,17 @@ Some registry checks will fail for a very long time, or permanently. The policy 
    traceability exports. `is_exportable` is `false` until the plot becomes `clear`, and then it
    flips to `true` for all of that plot's deliveries.
 4. **Flagged plots:** deliveries are still recorded and paid. The cherry is physically there, and
-   Jeanne's rule is same-day pay. These deliveries are non-exportable, and compliance reviews them
-   through `GET /api/deliveries/?exportable=false&risk_status=flagged` (for example, to decide
-   whether the cherry is sold on the non-certified market).
+   Jeanne requires same-day pay. These deliveries are non-exportable. They are listed at
+   `GET /api/deliveries/?exportable=false&risk_status=flagged` so the people preparing buyer data
+   can keep them out of traceable lots and decide what happens to that cherry (for example,
+   selling it outside the traceable channel).
 5. **Retries continue after `unverified`.** `unverified` means "no answer", not a verdict. The
    beat sweeper keeps re-enqueuing the check every `RISK_CHECK_STALE_HOURS`.
 6. **Manual review after N days.** A plot still `unverified` after
    `RISK_CHECK_MANUAL_REVIEW_DAYS` (default 7) shows `requires_manual_review: true` and appears
-   in the queue `GET /api/plots/?requires_manual_review=true`. Compliance then checks it by hand
-   (site visit or an alternative data source) before its cherry can enter an export lot.
+   in the queue `GET /api/plots/?requires_manual_review=true`. Someone then checks it by hand
+   (site visit or an alternative data source) before its cherry can enter an export lot, so
+   Patrick hears about a stuck plot weeks before the shipping window rather than during it.
 
 ---
 
@@ -197,7 +220,8 @@ were candidates:
 - `GET /api/price-schedule/`: **a few hundred bytes**, the same for everyone, and it changes a
   few times a season.
 - The station delivery feed (`GET /api/deliveries/`, `GET /api/stations/{id}/deliveries/`),
-  which Emmanuel reads on 2G. It **grows by about 400 rows a day per station** at harvest peak.
+  which Emmanuel reads on 2G. It **grows by about 400 rows a day** at the pilot station during
+  harvest peak.
   New rows arrive at the top *while he is scrolling*.
 
 ## Decision

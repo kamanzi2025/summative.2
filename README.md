@@ -244,7 +244,7 @@ curl -s -X POST http://127.0.0.1:8000/api/plots/ -H 'Content-Type: application/j
 
 ### List plots (filters: `farmer`, `sector`, `washing_station`, `risk_status`, `requires_manual_review`)
 
-`GET /api/plots/?requires_manual_review=true` is compliance's review queue: plots still
+`GET /api/plots/?requires_manual_review=true` is the manual-review queue: plots still
 `unverified` after `RISK_CHECK_MANUAL_REVIEW_DAYS`.
 
 ```bash
@@ -354,7 +354,7 @@ identical resend under the same `client_reference` is neither: it is an idempote
 `GET /api/deliveries/` and `GET /api/stations/{id}/deliveries/` return the same slim rows, newest
 first. Filters: `washing_station` (name, on `/api/deliveries/`), `grade`, `risk_status` (the plot's
 *current* status), `exportable` (`true`/`false`), and `since` (ISO datetime, strictly newer than
-`recorded_at`). Compliance's review list of paid-but-flagged cherry is
+`recorded_at`). The review list of paid-but-flagged cherry is
 `?exportable=false&risk_status=flagged`. Use `page_size`
 to change the page length (default 20, maximum 100).
 
