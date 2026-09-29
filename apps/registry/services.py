@@ -6,7 +6,7 @@ from typing import Any
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, Max, OuterRef
 from django.utils import timezone
 
 from .clients import RiskAssessment
@@ -15,6 +15,8 @@ from .models import AttemptOutcome, Farmer, Plot, RiskCheckAttempt, RiskStatus
 logger = logging.getLogger(__name__)
 
 SETTLED_STATUSES = frozenset({RiskStatus.CLEAR, RiskStatus.FLAGGED})
+# Hard ceiling for one registry call inside the worker (client timeout + margin).
+ATTEMPT_SOFT_TIME_LIMIT_SECONDS = int(settings.REGISTRY_API_TIMEOUT) + 30
 
 
 def register_farmer(data: dict[str, Any]) -> Farmer:
@@ -47,9 +49,13 @@ def enqueue_risk_check(plot_id: int) -> bool:
     return True
 
 
+@transaction.atomic
 def start_attempt(plot: Plot, task_id: str) -> RiskCheckAttempt:
-    number = RiskCheckAttempt.objects.filter(plot=plot).count() + 1
-    return RiskCheckAttempt.objects.create(plot=plot, attempt_number=number, task_id=task_id)
+    """Open the next numbered attempt. The plot row lock serialises concurrent tasks for the same
+    plot (e.g. a late retry overlapping a sweeper requeue); the unique constraint backs it up."""
+    Plot.objects.select_for_update().filter(pk=plot.pk).exists()
+    last = RiskCheckAttempt.objects.filter(plot=plot).aggregate(n=Max("attempt_number"))["n"] or 0
+    return RiskCheckAttempt.objects.create(plot=plot, attempt_number=last + 1, task_id=task_id)
 
 
 def finish_attempt(attempt: RiskCheckAttempt, outcome: str, error_message: str = "") -> RiskCheckAttempt:
@@ -85,6 +91,20 @@ def stale_plot_ids(limit: int = 500) -> list[int]:
         .exclude(Exists(recent_attempt))
         .order_by("created_at")
         .values_list("pk", flat=True)[:limit]
+    )
+
+
+def close_abandoned_attempts() -> int:
+    """Mark attempts still `running` long after any live call could last as errors.
+
+    Happens when a worker is killed mid-call (deploy, OOM); acks_late redelivers the message, but
+    the old row would otherwise claim to be running forever.
+    """
+    cutoff = timezone.now() - timedelta(seconds=ATTEMPT_SOFT_TIME_LIMIT_SECONDS * 2)
+    return RiskCheckAttempt.objects.filter(outcome=AttemptOutcome.RUNNING, started_at__lt=cutoff).update(
+        outcome=AttemptOutcome.ERROR,
+        finished_at=timezone.now(),
+        error_message="abandoned: worker stopped before the registry call finished",
     )
 
 

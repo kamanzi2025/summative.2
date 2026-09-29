@@ -131,6 +131,9 @@ class RiskCheckAttempt(models.Model):
     class Meta:
         ordering = ["plot", "attempt_number"]
         indexes = [models.Index(fields=["plot", "started_at"], name="riskcheck_plot_started_idx")]
+        constraints = [
+            models.UniqueConstraint(fields=["plot", "attempt_number"], name="unique_attempt_number_per_plot"),
+        ]
 
     def __str__(self) -> str:
         return f"{self.plot_id} #{self.attempt_number}: {self.outcome}"

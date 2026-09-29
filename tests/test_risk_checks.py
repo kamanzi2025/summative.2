@@ -5,6 +5,8 @@ from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from celery.exceptions import SoftTimeLimitExceeded
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.registry.clients import (
@@ -67,15 +69,66 @@ def test_failure_records_error_attempt_and_retries(make_plot):
     assert plot.risk_status == RiskStatus.CLEAR
 
 
-def test_retry_uses_exponential_backoff(make_plot):
+@pytest.mark.parametrize(("retries", "cap"), [(0, 60), (3, 480), (7, 3600)])
+def test_retry_uses_capped_exponential_backoff(make_plot, retries, cap):
     plot = make_plot()
     patcher, _ = registry_returning(RegistryUnavailable("503"))
     with patcher, patch.object(run_risk_check, "retry", side_effect=RuntimeError("stop")) as retry:
-        run_risk_check.apply(args=[plot.pk], retries=3)
+        run_risk_check.apply(args=[plot.pk], retries=retries)
     kwargs = retry.call_args.kwargs
     assert isinstance(kwargs["exc"], RegistryUnavailable)
-    # retry_backoff=True with full jitter: countdown is in [0, 2**3] seconds.
-    assert 0 <= kwargs["countdown"] <= 8
+    # retry_backoff=60 with full jitter: countdown is random in [0, min(60 * 2**retries, 3600)].
+    assert 0 <= kwargs["countdown"] <= cap
+
+
+def test_retry_schedule_spans_hours_not_minutes():
+    """Worst case across all retries must outlast a multi-hour outage (ADR-001)."""
+    from celery.utils.time import get_exponential_backoff_interval
+
+    worst = sum(
+        get_exponential_backoff_interval(factor=60, retries=n, maximum=3600, full_jitter=False)
+        for n in range(run_risk_check.max_retries)
+    )
+    assert worst == 60 + 120 + 240 + 480 + 960 + 1920 + 3600 + 3600  # 10,980 s, about 3 hours
+
+
+def test_task_time_limit_is_recorded_as_timeout_and_retried(make_plot):
+    plot = make_plot()
+    patcher, _ = registry_returning(SoftTimeLimitExceeded(), CLEAR)
+    with patcher:
+        run_risk_check.apply(args=[plot.pk])
+    plot.refresh_from_db()
+    assert outcomes(plot) == ["timeout", "clear"]
+    assert "time limit" in plot.risk_checks.get(attempt_number=1).error_message
+    assert plot.risk_status == RiskStatus.CLEAR
+
+
+def test_attempt_numbers_continue_after_existing_attempts(make_plot):
+    plot = make_plot()
+    plot.risk_checks.create(attempt_number=3, outcome="error")
+    patcher, _ = registry_returning(CLEAR)
+    with patcher:
+        run_risk_check.apply(args=[plot.pk])
+    assert list(plot.risk_checks.values_list("attempt_number", flat=True)) == [3, 4]
+
+
+def test_attempt_numbers_are_unique_per_plot(make_plot):
+    plot = make_plot()
+    plot.risk_checks.create(attempt_number=1)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        plot.risk_checks.create(attempt_number=1)
+
+
+def test_sweeper_closes_attempts_abandoned_by_a_dead_worker(make_plot):
+    plot = make_plot(risk_status=RiskStatus.CLEAR)
+    dead = plot.risk_checks.create(attempt_number=1, started_at=timezone.now() - timedelta(hours=1))
+    live = plot.risk_checks.create(attempt_number=2)
+    with patch("apps.registry.tasks.run_risk_check.delay"):
+        requeue_stale_risk_checks.apply()
+    dead.refresh_from_db()
+    live.refresh_from_db()
+    assert dead.outcome == AttemptOutcome.ERROR and "abandoned" in dead.error_message
+    assert live.outcome == AttemptOutcome.RUNNING
 
 
 def test_exhausted_retries_mark_plot_unverified(make_plot):
