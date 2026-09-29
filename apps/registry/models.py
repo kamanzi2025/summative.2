@@ -1,0 +1,136 @@
+from datetime import timedelta
+from decimal import Decimal
+
+from django.conf import settings
+from django.db import models
+from django.db.models import Q
+from django.utils import timezone
+
+# Rwanda's bounding box, slightly padded. Coordinates outside it are typos, not plots.
+RWANDA_LAT_MIN, RWANDA_LAT_MAX = Decimal("-2.85"), Decimal("-1.04")
+RWANDA_LON_MIN, RWANDA_LON_MAX = Decimal("28.85"), Decimal("30.90")
+MAX_PLOT_AREA_HECTARES = Decimal("50")
+
+
+class Sector(models.Model):
+    """Administrative sector. Formative 2 scopes access and coarsens coordinates by sector."""
+
+    name = models.CharField(max_length=80, unique=True)
+    district = models.CharField(max_length=80)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.district})"
+
+
+class WashingStation(models.Model):
+    name = models.CharField(max_length=80, unique=True)
+    code = models.CharField(max_length=16, unique=True)
+    sector = models.ForeignKey(Sector, on_delete=models.PROTECT, related_name="washing_stations")
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Farmer(models.Model):
+    full_name = models.CharField(max_length=150)
+    member_number = models.CharField(max_length=32, unique=True)
+    cooperative = models.CharField(max_length=120, blank=True)
+    # Stored in E.164 (+2507XXXXXXXX); the serializer normalises local 07XXXXXXXX input.
+    phone = models.CharField(max_length=13, unique=True)
+    national_id = models.CharField(max_length=16, unique=True, null=True, blank=True)
+    home_station = models.ForeignKey(
+        WashingStation, on_delete=models.PROTECT, null=True, blank=True, related_name="farmers"
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self) -> str:
+        return f"{self.full_name} ({self.member_number})"
+
+
+class RiskStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    CLEAR = "clear", "Clear"
+    FLAGGED = "flagged", "Flagged"
+    # Registry never answered after all retries. Not a verdict; the sweeper keeps retrying.
+    UNVERIFIED = "unverified", "Unverified"
+
+
+class Plot(models.Model):
+    farmer = models.ForeignKey(Farmer, on_delete=models.PROTECT, related_name="plots")
+    plot_code = models.CharField(max_length=32, unique=True)
+    label = models.CharField(max_length=100, blank=True)
+    # Foreign keys are indexed automatically, which covers Plot(sector) and Plot(washing_station).
+    sector = models.ForeignKey(Sector, on_delete=models.PROTECT, related_name="plots")
+    washing_station = models.ForeignKey(WashingStation, on_delete=models.PROTECT, related_name="plots")
+    area_hectares = models.DecimalField(max_digits=8, decimal_places=4)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    risk_status = models.CharField(max_length=12, choices=RiskStatus.choices, default=RiskStatus.PENDING)
+    risk_checked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            # Serves the risk_status filter and the stale-check sweeper (status + age).
+            models.Index(fields=["risk_status", "created_at"], name="plot_risk_status_created_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(area_hectares__gt=0) & Q(area_hectares__lte=MAX_PLOT_AREA_HECTARES),
+                name="plot_area_in_range",
+            ),
+            models.CheckConstraint(
+                condition=Q(latitude__gte=RWANDA_LAT_MIN, latitude__lte=RWANDA_LAT_MAX)
+                & Q(longitude__gte=RWANDA_LON_MIN, longitude__lte=RWANDA_LON_MAX),
+                name="plot_inside_rwanda",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.plot_code
+
+    @property
+    def requires_manual_review(self) -> bool:
+        """Unverified for longer than the policy window: a person must look at it."""
+        if self.risk_status != RiskStatus.UNVERIFIED:
+            return False
+        window = timedelta(days=settings.RISK_CHECK_MANUAL_REVIEW_DAYS)
+        return timezone.now() - self.created_at >= window
+
+
+class AttemptOutcome(models.TextChoices):
+    RUNNING = "running", "Running"
+    CLEAR = "clear", "Clear"
+    FLAGGED = "flagged", "Flagged"
+    ERROR = "error", "Error"
+    TIMEOUT = "timeout", "Timeout"
+
+
+class RiskCheckAttempt(models.Model):
+    """One call to the deforestation-risk registry. This table is the audit trail of retries."""
+
+    plot = models.ForeignKey(Plot, on_delete=models.CASCADE, related_name="risk_checks")
+    attempt_number = models.PositiveIntegerField()
+    task_id = models.CharField(max_length=255, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    outcome = models.CharField(max_length=10, choices=AttemptOutcome.choices, default=AttemptOutcome.RUNNING)
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["plot", "attempt_number"]
+        indexes = [models.Index(fields=["plot", "started_at"], name="riskcheck_plot_started_idx")]
+
+    def __str__(self) -> str:
+        return f"{self.plot_id} #{self.attempt_number}: {self.outcome}"
