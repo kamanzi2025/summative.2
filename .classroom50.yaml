@@ -1,0 +1,13 @@
+schema: "classroom50/repo-config/v1"
+classroom: "advanced-python-programming"
+assignment: "kawa"
+secret: "ixhtwg93"
+owner:
+  username: "kamanzi2025"
+  id: 194212355
+  accepted_at: "2026-09-29T18:05:35Z"
+source:
+  owner: "ALU-BSE"
+  owner_id: 148322097
+  repo: "advanced-python-kawa-template"
+  branch: "main"
