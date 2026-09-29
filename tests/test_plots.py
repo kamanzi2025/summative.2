@@ -101,3 +101,19 @@ def test_duplicate_plot_code_is_rejected(api, plot_payload, make_plot):
     response = api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 400
     assert "plot_code" in response.json()["error"]["details"]
+
+
+def test_manual_review_queue_filter(api, make_plot, settings):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    settings.RISK_CHECK_MANUAL_REVIEW_DAYS = 7
+    overdue = make_plot(risk_status=RiskStatus.UNVERIFIED, created_at=timezone.now() - timedelta(days=9))
+    make_plot(risk_status=RiskStatus.UNVERIFIED)  # unverified, but still inside the window
+    make_plot(risk_status=RiskStatus.CLEAR, created_at=timezone.now() - timedelta(days=9))
+
+    queue = api.get("/api/plots/?requires_manual_review=true").json()["results"]
+    assert [row["id"] for row in queue] == [overdue.pk]
+    assert queue[0]["requires_manual_review"] is True
+    assert len(api.get("/api/plots/?requires_manual_review=false").json()["results"]) == 2

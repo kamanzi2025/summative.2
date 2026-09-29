@@ -5,9 +5,11 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 
 import pytest
+from django.db import connection
 from django.utils import timezone
 
 from apps.deliveries.models import Delivery
+from apps.deliveries.services import feed_queryset
 from apps.pricing.models import PriceSchedule
 from apps.registry.models import RiskStatus
 
@@ -147,3 +149,24 @@ def test_grade_and_risk_filters(api, make_delivery):
     assert ids("grade=B") == {b_clear.pk}
     assert ids("risk_status=flagged") == {flagged.pk}
     assert ids("grade=A&risk_status=clear") == {a_clear.pk}
+
+
+def test_exportable_filter(api, make_delivery):
+    clear = make_delivery(risk=RiskStatus.CLEAR)
+    pending = make_delivery(risk=RiskStatus.PENDING)
+    flagged = make_delivery(risk=RiskStatus.FLAGGED)
+
+    def ids(query: str) -> set[int]:
+        return {row["id"] for row in api.get(f"/api/deliveries/?{query}").json()["results"]}
+
+    assert ids("exportable=true") == {clear.pk}
+    assert ids("exportable=false") == {pending.pk, flagged.pk}
+    assert ids("exportable=false&risk_status=flagged") == {flagged.pk}
+
+
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="EXPLAIN output format is SQLite-specific")
+def test_station_feed_query_uses_composite_index(nyaruguru):
+    """The feed must be an index range scan, not a full scan plus sort (README: Performance)."""
+    plan = feed_queryset().filter(washing_station=nyaruguru)[:21].explain()
+    assert "delivery_station_feed_idx" in plan
+    assert "TEMP B-TREE FOR ORDER BY" not in plan
