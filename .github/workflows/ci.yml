@@ -51,6 +51,9 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Format
+        run: ruff format --check .
+
       - name: Type check
         run: mypy apps config manage.py
 
