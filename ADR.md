@@ -1,3 +1,17 @@
+# Architecture Decision Records
+
+Kawa Network API, Formative 1. Each record states the problem, the decision, the options we
+rejected and what the decision costs. Records are append-only: a changed decision gets a new ADR
+that supersedes the old one.
+
+| ADR | Decision | Status | Main stakeholder |
+|---|---|---|---|
+| [ADR-001](#adr-001-accept-then-verify-for-plot-deforestation-risk-checks) | Verify plot risk in the background; never block deliveries on the registry | Accepted | Emmanuel, Jeanne (Patrick carries the cost) |
+| [ADR-002](#adr-002-whose-performance-problem-to-solve-first-the-station-delivery-feed) | Cursor-paginate the station delivery feed instead of caching the price schedule | Accepted | Emmanuel |
+| [ADR-003](#adr-003-idempotent-writes-keyed-on-natural-identifiers) | Make every create idempotent on the record's natural key | Accepted | Emmanuel, Jeanne |
+
+---
+
 # ADR-001: Accept-then-verify for plot deforestation-risk checks
 
 - **Status:** Accepted
@@ -269,3 +283,68 @@ visible to the next request and to every client within 60 seconds.
   with no sort step, and `test_station_feed_query_uses_composite_index` fails if that regresses.
 - If the price schedule ever becomes a hot path, a server-side cache can be added then, with
   invalidation on save. We have deferred it on purpose.
+
+---
+
+# ADR-003: Idempotent writes keyed on natural identifiers
+
+- **Status:** Accepted
+- **Date:** 2026-09-29
+- **Scope:** `POST /api/farmers/`, `POST /api/plots/`, `POST /api/deliveries/`
+
+## Context
+
+Station phones talk to the API over 2G. A common failure is not "the request never arrived" but
+"the request succeeded and the response was lost". The phone cannot tell these apart, so it
+resends. Without protection:
+
+- A resent **delivery** records the same cherry twice, and Jeanne pays the farmer twice.
+- A resent **farmer** or **plot** registration fails with a duplicate-key `400`. The clerk sees
+  an error for something that worked, and may re-enter it with a typo to get past the error.
+- A resent **plot** would also queue a second registry check (ADR-001).
+
+Each resource already has an identifier the station knows before it sends the request: a
+farmer's `member_number`, a plot's `plot_code`, and, for deliveries, a `client_reference` the phone
+generates per weighing (unique per station).
+
+## Decision
+
+**Every create is idempotent on that natural key.** Before validation, the view looks the key up:
+
+1. **No match:** create normally and return `201` with `Idempotent-Replayed: false`.
+2. **Match with an identical body** (after the same normalisation the serializer applies, e.g.
+   phone numbers to E.164 and `"38.5"` equal to `"38.50"`): return the stored record with `200`
+   and `Idempotent-Replayed: true`. Nothing is written, and no risk check is queued.
+3. **Match with a different body:** return `409 conflict` with
+   `details: {"id", "mismatched_fields"}`, so the phone can show what differs.
+
+A race between two identical requests that both pass step 1 is caught by the database unique
+constraint and answered with the original record. The logic lives in one place,
+`NaturalKeyReplayMixin` (`apps/core/idempotency.py`), so all three endpoints behave and document
+the same way. The replay check runs *before* validation on purpose: a delivery replayed after a
+price change must return what was originally recorded, not fail or re-price.
+
+## Alternatives considered
+
+- **`Idempotency-Key` request header with a stored response.** The general-purpose industry
+  pattern. Rejected for F1: it needs a key/response store with expiry, and the station app would
+  have to generate and keep a second identifier alongside the natural key it already has.
+  It stays the right option if a create without a natural key appears.
+- **Rely on unique constraints and return `400`.** Simplest, but it turns every successful retry
+  into an error the clerk has to interpret, and it gives no protection to deliveries, whose
+  natural fields (plot, weight, grade, day) can legitimately repeat.
+- **De-duplicate deliveries on (plot, weight, grade, date).** Rejected: two identical 35 kg
+  deliveries from the same plot on the same day are real and must both be paid.
+
+## Consequences
+
+- **Positive:** retries are always safe, so the phone can retry aggressively on a bad connection.
+  No duplicate payments, no false errors, no duplicate registry calls.
+- **Negative:** the station app must generate a unique `client_reference` per delivery.
+  Without one, deliveries are not protected (the field is optional in F1 for the contract's
+  sake). Replay comparison is hand-written per resource and must track serializer changes;
+  `tests/test_farmers.py`, `tests/test_plots.py` and `tests/test_deliveries.py` cover equivalent
+  and conflicting resends to catch drift.
+- **Security note for F2:** a replay currently returns the stored record to anyone who knows the
+  natural key. Once authentication lands, replays must go through the same object-level
+  permission check as `GET` on that record.
