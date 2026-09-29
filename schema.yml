@@ -1,0 +1,1097 @@
+openapi: 3.0.3
+info:
+  title: Kawa Network API
+  version: 1.0.0
+  description: Farmer, plot and cherry-delivery registry for Kawa Network washing
+    stations. Plot deforestation-risk checks run asynchronously; deliveries are never
+    blocked by them.
+paths:
+  /api/deliveries/:
+    get:
+      operationId: deliveries_list
+      description: Record deliveries (idempotent on `client_reference`) and read the
+        cursor-paginated feed.
+      parameters:
+      - name: cursor
+        required: false
+        in: query
+        description: The pagination cursor value.
+        schema:
+          type: string
+      - in: query
+        name: exportable
+        schema:
+          type: boolean
+      - in: query
+        name: grade
+        schema:
+          type: string
+          enum:
+          - A
+          - B
+          - C
+        description: |-
+          * `A` - Grade A (ripe red cherry)
+          * `B` - Grade B (mixed ripeness)
+          * `C` - Grade C (floaters / under-ripe)
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: risk_status
+        schema:
+          type: string
+          enum:
+          - clear
+          - flagged
+          - pending
+          - unverified
+        description: |-
+          * `pending` - Pending
+          * `clear` - Clear
+          * `flagged` - Flagged
+          * `unverified` - Unverified
+      - in: query
+        name: since
+        schema:
+          type: string
+          format: date-time
+      - in: query
+        name: washing_station
+        schema:
+          type: string
+      tags:
+      - deliveries
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDeliveryFeedList'
+          description: ''
+    post:
+      operationId: deliveries_create
+      description: Record deliveries (idempotent on `client_reference`) and read the
+        cursor-paginated feed.
+      tags:
+      - deliveries
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryRequest'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delivery'
+          description: ''
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delivery'
+          description: 'Replay: this client_reference was already recorded.'
+        '409':
+          description: client_reference reused with a different body.
+  /api/deliveries/{id}/:
+    get:
+      operationId: deliveries_retrieve
+      description: Record deliveries (idempotent on `client_reference`) and read the
+        cursor-paginated feed.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this delivery.
+        required: true
+      tags:
+      - deliveries
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delivery'
+          description: ''
+  /api/farmers/:
+    get:
+      operationId: farmers_list
+      description: Registering the same member_number again with identical details
+        replays (200).
+      parameters:
+      - name: cursor
+        required: false
+        in: query
+        description: The pagination cursor value.
+        schema:
+          type: string
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - farmers
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedFarmerList'
+          description: ''
+    post:
+      operationId: farmers_create
+      description: Registering the same member_number again with identical details
+        replays (200).
+      tags:
+      - farmers
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FarmerRequest'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Farmer'
+          description: ''
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Farmer'
+          description: 'Identical resend: the existing record is returned.'
+        '409':
+          description: Natural key already registered with different details.
+  /api/farmers/{id}/:
+    get:
+      operationId: farmers_retrieve
+      description: Registering the same member_number again with identical details
+        replays (200).
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this farmer.
+        required: true
+      tags:
+      - farmers
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Farmer'
+          description: ''
+  /api/plots/:
+    get:
+      operationId: plots_list
+      description: |-
+        Registering a plot returns 201 immediately with `risk_status: "pending"`; the
+        deforestation-risk check runs in the background (see apps/registry/tasks.py). Resending the
+        same plot_code with identical details replays (200) and does not queue a second check.
+      parameters:
+      - name: cursor
+        required: false
+        in: query
+        description: The pagination cursor value.
+        schema:
+          type: string
+      - in: query
+        name: farmer
+        schema:
+          type: number
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: requires_manual_review
+        schema:
+          type: boolean
+      - in: query
+        name: risk_status
+        schema:
+          type: string
+          enum:
+          - clear
+          - flagged
+          - pending
+          - unverified
+        description: |-
+          * `pending` - Pending
+          * `clear` - Clear
+          * `flagged` - Flagged
+          * `unverified` - Unverified
+      - in: query
+        name: sector
+        schema:
+          type: string
+      - in: query
+        name: washing_station
+        schema:
+          type: string
+      tags:
+      - plots
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPlotList'
+          description: ''
+    post:
+      operationId: plots_create
+      description: |-
+        Registering a plot returns 201 immediately with `risk_status: "pending"`; the
+        deforestation-risk check runs in the background (see apps/registry/tasks.py). Resending the
+        same plot_code with identical details replays (200) and does not queue a second check.
+      tags:
+      - plots
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlotRequest'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plot'
+          description: ''
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plot'
+          description: 'Identical resend: the existing record is returned.'
+        '409':
+          description: Natural key already registered with different details.
+  /api/plots/{id}/:
+    get:
+      operationId: plots_retrieve
+      description: |-
+        Registering a plot returns 201 immediately with `risk_status: "pending"`; the
+        deforestation-risk check runs in the background (see apps/registry/tasks.py). Resending the
+        same plot_code with identical details replays (200) and does not queue a second check.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this plot.
+        required: true
+      tags:
+      - plots
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plot'
+          description: ''
+  /api/plots/{id}/risk-checks/:
+    get:
+      operationId: plots_risk_checks_list
+      description: 'Every registry call made for this plot, oldest first: evidence
+        of retries.'
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this plot.
+        required: true
+      tags:
+      - plots
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RiskCheckAttempt'
+          description: ''
+  /api/price-schedule/:
+    get:
+      operationId: price_schedule_retrieve
+      description: |-
+        Active season's per-grade farm-gate prices.
+
+        Not cached on the server: every request reads the database, so a price change is visible to
+        the next request. Clients may reuse a response for PRICE_SCHEDULE_MAX_AGE_SECONDS (default
+        60 s), which is the whole staleness window.
+      tags:
+      - price-schedule
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceSchedule'
+          description: ''
+  /api/stations/:
+    get:
+      operationId: stations_list
+      tags:
+      - stations
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WashingStation'
+          description: ''
+  /api/stations/{id}/:
+    get:
+      operationId: stations_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this washing station.
+        required: true
+      tags:
+      - stations
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WashingStation'
+          description: ''
+  /api/stations/{station_id}/deliveries/:
+    get:
+      operationId: stations_deliveries_list
+      description: 'Emmanuel''s station feed: newest deliveries first, cursor-paginated.'
+      parameters:
+      - name: cursor
+        required: false
+        in: query
+        description: The pagination cursor value.
+        schema:
+          type: string
+      - in: query
+        name: exportable
+        schema:
+          type: boolean
+      - in: query
+        name: grade
+        schema:
+          type: string
+          enum:
+          - A
+          - B
+          - C
+        description: |-
+          * `A` - Grade A (ripe red cherry)
+          * `B` - Grade B (mixed ripeness)
+          * `C` - Grade C (floaters / under-ripe)
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: risk_status
+        schema:
+          type: string
+          enum:
+          - clear
+          - flagged
+          - pending
+          - unverified
+        description: |-
+          * `pending` - Pending
+          * `clear` - Clear
+          * `flagged` - Flagged
+          * `unverified` - Unverified
+      - in: query
+        name: since
+        schema:
+          type: string
+          format: date-time
+      - in: path
+        name: station_id
+        schema:
+          type: integer
+        required: true
+      - in: query
+        name: washing_station
+        schema:
+          type: string
+      tags:
+      - stations
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDeliveryFeedList'
+          description: ''
+  /api/status/:
+    get:
+      operationId: status_retrieve
+      description: |-
+        Liveness probe, plus the risk-check backlog so a stalled worker is visible.
+
+        `status` stays "ok" while the API can serve requests: a registry or worker problem must not
+        make a load balancer pull a healthy API. `risk_checks.healthy` is false when plots are stale.
+      tags:
+      - status
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+          description: ''
+components:
+  schemas:
+    AttemptOutcomeEnum:
+      enum:
+      - running
+      - clear
+      - flagged
+      - error
+      - timeout
+      type: string
+      description: |-
+        * `running` - Running
+        * `clear` - Clear
+        * `flagged` - Flagged
+        * `error` - Error
+        * `timeout` - Timeout
+    Delivery:
+      type: object
+      description: Full delivery record, used to record a delivery and to read one
+        back.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        plot:
+          type: integer
+        plot_code:
+          type: string
+          readOnly: true
+        farmer:
+          type: integer
+          readOnly: true
+        farmer_name:
+          type: string
+          readOnly: true
+        washing_station:
+          type: string
+        weight_kg:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+        grade:
+          $ref: '#/components/schemas/GradeEnum'
+        delivered_on:
+          type: string
+          format: date
+        client_reference:
+          type: string
+          nullable: true
+          maxLength: 64
+        season:
+          type: string
+          readOnly: true
+        unit_price_rwf:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,8}(?:\.\d{0,2})?$
+          readOnly: true
+        amount_due_rwf:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+        plot_risk_status_at_delivery:
+          allOf:
+          - $ref: '#/components/schemas/RiskStatusEnum'
+          readOnly: true
+        is_exportable:
+          type: boolean
+          readOnly: true
+        recorded_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - amount_due_rwf
+      - farmer
+      - farmer_name
+      - grade
+      - id
+      - is_exportable
+      - plot
+      - plot_code
+      - plot_risk_status_at_delivery
+      - recorded_at
+      - season
+      - unit_price_rwf
+      - washing_station
+      - weight_kg
+    DeliveryFeed:
+      type: object
+      description: 'Slim, flat row for the station feed: no nested objects, so pages
+        stay small on 2G.'
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        client_reference:
+          type: string
+          readOnly: true
+          nullable: true
+        washing_station:
+          type: string
+          readOnly: true
+        plot:
+          type: integer
+          readOnly: true
+        plot_code:
+          type: string
+          readOnly: true
+        farmer_name:
+          type: string
+          readOnly: true
+        weight_kg:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          readOnly: true
+        grade:
+          allOf:
+          - $ref: '#/components/schemas/GradeEnum'
+          readOnly: true
+        amount_due_rwf:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+        delivered_on:
+          type: string
+          format: date
+          readOnly: true
+        recorded_at:
+          type: string
+          format: date-time
+          readOnly: true
+        is_exportable:
+          type: boolean
+          readOnly: true
+      required:
+      - amount_due_rwf
+      - client_reference
+      - delivered_on
+      - farmer_name
+      - grade
+      - id
+      - is_exportable
+      - plot
+      - plot_code
+      - recorded_at
+      - washing_station
+      - weight_kg
+    DeliveryRequest:
+      type: object
+      description: Full delivery record, used to record a delivery and to read one
+        back.
+      properties:
+        plot:
+          type: integer
+        washing_station:
+          type: string
+          minLength: 1
+        weight_kg:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+        grade:
+          $ref: '#/components/schemas/GradeEnum'
+        delivered_on:
+          type: string
+          format: date
+        client_reference:
+          type: string
+          nullable: true
+          maxLength: 64
+      required:
+      - grade
+      - plot
+      - washing_station
+      - weight_kg
+    Farmer:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        full_name:
+          type: string
+          maxLength: 150
+        member_number:
+          type: string
+          maxLength: 32
+        cooperative:
+          type: string
+          maxLength: 120
+        phone:
+          type: string
+          maxLength: 20
+        national_id:
+          type: string
+          nullable: true
+          maxLength: 16
+        home_station:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - full_name
+      - id
+      - member_number
+      - phone
+    FarmerRequest:
+      type: object
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 150
+        member_number:
+          type: string
+          minLength: 1
+          maxLength: 32
+        cooperative:
+          type: string
+          maxLength: 120
+        phone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        national_id:
+          type: string
+          nullable: true
+          maxLength: 16
+        home_station:
+          type: string
+          minLength: 1
+          nullable: true
+      required:
+      - full_name
+      - member_number
+      - phone
+    GradeEnum:
+      enum:
+      - A
+      - B
+      - C
+      type: string
+      description: |-
+        * `A` - Grade A (ripe red cherry)
+        * `B` - Grade B (mixed ripeness)
+        * `C` - Grade C (floaters / under-ripe)
+    PaginatedDeliveryFeedList:
+      type: object
+      required:
+      - results
+      properties:
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cD00ODY%3D"
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cj0xJnA9NDg3
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeliveryFeed'
+    PaginatedFarmerList:
+      type: object
+      required:
+      - results
+      properties:
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cD00ODY%3D"
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cj0xJnA9NDg3
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Farmer'
+    PaginatedPlotList:
+      type: object
+      required:
+      - results
+      properties:
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cD00ODY%3D"
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cj0xJnA9NDg3
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Plot'
+    Plot:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        farmer:
+          type: integer
+        plot_code:
+          type: string
+          maxLength: 32
+        label:
+          type: string
+          maxLength: 100
+        sector:
+          type: string
+        washing_station:
+          type: string
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+        area_hectares:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,4})?$
+        risk_status:
+          allOf:
+          - $ref: '#/components/schemas/RiskStatusEnum'
+          readOnly: true
+        risk_checked_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        requires_manual_review:
+          type: boolean
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - area_hectares
+      - created_at
+      - farmer
+      - id
+      - latitude
+      - longitude
+      - plot_code
+      - requires_manual_review
+      - risk_checked_at
+      - risk_status
+      - sector
+      - washing_station
+    PlotRequest:
+      type: object
+      properties:
+        farmer:
+          type: integer
+        plot_code:
+          type: string
+          minLength: 1
+          maxLength: 32
+        label:
+          type: string
+          maxLength: 100
+        sector:
+          type: string
+          minLength: 1
+        washing_station:
+          type: string
+          minLength: 1
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+        area_hectares:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,4})?$
+      required:
+      - area_hectares
+      - farmer
+      - latitude
+      - longitude
+      - plot_code
+      - sector
+      - washing_station
+    PriceEntry:
+      type: object
+      properties:
+        grade:
+          $ref: '#/components/schemas/GradeEnum'
+        price_per_kg_rwf:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,8}(?:\.\d{0,2})?$
+      required:
+      - grade
+      - price_per_kg_rwf
+    PriceSchedule:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        season:
+          type: string
+          description: e.g. "2026A"
+          maxLength: 10
+        effective_from:
+          type: string
+          format: date
+        currency:
+          type: string
+          readOnly: true
+        unit:
+          type: string
+          readOnly: true
+        prices:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceEntry'
+      required:
+      - currency
+      - effective_from
+      - id
+      - prices
+      - season
+      - unit
+    RiskCheckAttempt:
+      type: object
+      properties:
+        attempt_number:
+          type: integer
+          readOnly: true
+        outcome:
+          allOf:
+          - $ref: '#/components/schemas/AttemptOutcomeEnum'
+          readOnly: true
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+        finished_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        duration_ms:
+          type: integer
+          readOnly: true
+          nullable: true
+        error_message:
+          type: string
+          readOnly: true
+        task_id:
+          type: string
+          readOnly: true
+      required:
+      - attempt_number
+      - duration_ms
+      - error_message
+      - finished_at
+      - outcome
+      - started_at
+      - task_id
+    RiskCheckBacklog:
+      type: object
+      properties:
+        pending:
+          type: integer
+        unverified:
+          type: integer
+        stale:
+          type: integer
+        requires_manual_review:
+          type: integer
+        last_attempt_at:
+          type: string
+          format: date-time
+          nullable: true
+        healthy:
+          type: boolean
+      required:
+      - healthy
+      - last_attempt_at
+      - pending
+      - requires_manual_review
+      - stale
+      - unverified
+    RiskStatusEnum:
+      enum:
+      - pending
+      - clear
+      - flagged
+      - unverified
+      type: string
+      description: |-
+        * `pending` - Pending
+        * `clear` - Clear
+        * `flagged` - Flagged
+        * `unverified` - Unverified
+    Status:
+      type: object
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+        time:
+          type: string
+          format: date-time
+        risk_checks:
+          $ref: '#/components/schemas/RiskCheckBacklog'
+      required:
+      - risk_checks
+      - service
+      - status
+      - time
+    WashingStation:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          maxLength: 80
+        code:
+          type: string
+          maxLength: 16
+        sector:
+          type: string
+          readOnly: true
+      required:
+      - code
+      - id
+      - name
+      - sector
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: sessionid

@@ -27,3 +27,43 @@ jobs:
           test ! -f manage.py
           test ! -d config
           test ! -d apps
+
+  lint-and-test:
+    if: github.repository != 'ALU-BSE/advanced-python-kawa-template'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure environment
+        run: cp .env.example .env
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy apps config manage.py
+
+      - name: Django checks and migrations
+        run: |
+          python manage.py check
+          python manage.py makemigrations --check --dry-run
+          python manage.py migrate --noinput
+
+      - name: Validate OpenAPI schema is current
+        run: |
+          python manage.py spectacular --file /tmp/schema.yml --validate
+          diff -u schema.yml /tmp/schema.yml
+
+      - name: Tests
+        run: python -m pytest -q

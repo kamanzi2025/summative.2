@@ -13,3 +13,7 @@ htmlcov/
 *.pyd
 coverage.xml
 
+venv/
+.venv*/
+staticfiles/
+*.sqlite3
