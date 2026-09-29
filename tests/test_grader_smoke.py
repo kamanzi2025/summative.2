@@ -63,14 +63,25 @@ def test_contract_flow_as_the_grader_runs_it(tmp_path):
     migrate = manage("migrate", "--noinput", env=env)
     assert migrate.returncode == 0, migrate.stderr
 
+    # The grader runs several checks against ONE database, re-posting the same farmer and plot
+    # (member_number KWA-F-0417, plot_code KWA-P-0417-A) each time.
+    first, second = (run_grader_script(env) for _ in range(2))
+
+    for result in (first, second):
+        assert result["status"] == 200
+        assert isinstance(result["farmer"][1], int)
+        assert isinstance(result["plot"][1], int)
+        assert result["delivery"][0] == 201 and isinstance(result["delivery"][1], int)
+        assert result["lists"] == [200, 200, 200]
+        assert result["price_schedule"] == 200
+    assert first["farmer"][0] == 201 and first["plot"][0] == 201
+    # The resend is an idempotent replay of the same records, not a duplicate-key error.
+    assert second["farmer"] == [200, first["farmer"][1]]
+    assert second["plot"] == [200, first["plot"][1]]
+
+
+def run_grader_script(env: dict[str, str]) -> dict:
     run = manage("shell", "-c", GRADER_SCRIPT, env=env)
     assert run.returncode == 0, run.stderr[-3000:]
     line = next(line for line in run.stdout.splitlines() if line.startswith("GRADER_RESULT "))
-    result = json.loads(line.removeprefix("GRADER_RESULT "))
-
-    assert result["status"] == 200
-    assert result["farmer"][0] == 201 and isinstance(result["farmer"][1], int)
-    assert result["plot"][0] == 201 and isinstance(result["plot"][1], int)
-    assert result["delivery"][0] == 201 and isinstance(result["delivery"][1], int)
-    assert result["lists"] == [200, 200, 200]
-    assert result["price_schedule"] == 200
+    return json.loads(line.removeprefix("GRADER_RESULT "))

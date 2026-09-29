@@ -135,6 +135,8 @@ paths:
   /api/farmers/:
     get:
       operationId: farmers_list
+      description: Registering the same member_number again with identical details
+        replays (200).
       parameters:
       - name: cursor
         required: false
@@ -163,6 +165,8 @@ paths:
           description: ''
     post:
       operationId: farmers_create
+      description: Registering the same member_number again with identical details
+        replays (200).
       tags:
       - farmers
       requestBody:
@@ -182,9 +186,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/Farmer'
           description: ''
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Farmer'
+          description: 'Identical resend: the existing record is returned.'
+        '409':
+          description: Natural key already registered with different details.
   /api/farmers/{id}/:
     get:
       operationId: farmers_retrieve
+      description: Registering the same member_number again with identical details
+        replays (200).
       parameters:
       - in: path
         name: id
@@ -210,7 +224,8 @@ paths:
       operationId: plots_list
       description: |-
         Registering a plot returns 201 immediately with `risk_status: "pending"`; the
-        deforestation-risk check runs in the background (see apps/registry/tasks.py).
+        deforestation-risk check runs in the background (see apps/registry/tasks.py). Resending the
+        same plot_code with identical details replays (200) and does not queue a second check.
       parameters:
       - name: cursor
         required: false
@@ -271,7 +286,8 @@ paths:
       operationId: plots_create
       description: |-
         Registering a plot returns 201 immediately with `risk_status: "pending"`; the
-        deforestation-risk check runs in the background (see apps/registry/tasks.py).
+        deforestation-risk check runs in the background (see apps/registry/tasks.py). Resending the
+        same plot_code with identical details replays (200) and does not queue a second check.
       tags:
       - plots
       requestBody:
@@ -291,12 +307,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/Plot'
           description: ''
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plot'
+          description: 'Identical resend: the existing record is returned.'
+        '409':
+          description: Natural key already registered with different details.
   /api/plots/{id}/:
     get:
       operationId: plots_retrieve
       description: |-
         Registering a plot returns 201 immediately with `risk_status: "pending"`; the
-        deforestation-risk check runs in the background (see apps/registry/tasks.py).
+        deforestation-risk check runs in the background (see apps/registry/tasks.py). Resending the
+        same plot_code with identical details replays (200) and does not queue a second check.
       parameters:
       - in: path
         name: id

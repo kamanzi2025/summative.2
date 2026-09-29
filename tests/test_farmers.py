@@ -51,8 +51,21 @@ def test_rejects_malformed_national_id(api, farmer_payload, national_id):
     assert "national_id" in response.json()["error"]["details"]
 
 
-def test_rejects_duplicate_member_number(api, farmer_payload, make_farmer):
-    make_farmer(member_number="KWA-F-0417")
+def test_identical_resend_replays_existing_farmer(api, farmer_payload):
+    first = api.post("/api/farmers/", farmer_payload, format="json")
+    # A 2G retry may resend the phone in local form; it normalises to the same farmer.
+    replay = api.post("/api/farmers/", {**farmer_payload, "phone": "0780000000"}, format="json")
+    assert first.status_code == 201 and first.headers["Idempotent-Replayed"] == "false"
+    assert replay.status_code == 200 and replay.headers["Idempotent-Replayed"] == "true"
+    assert replay.json()["id"] == first.json()["id"]
+    assert Farmer.objects.count() == 1
+
+
+def test_member_number_reused_with_different_details_is_a_conflict(api, farmer_payload, make_farmer):
+    existing = make_farmer(member_number="KWA-F-0417")
     response = api.post("/api/farmers/", farmer_payload, format="json")
-    assert response.status_code == 400
-    assert "member_number" in response.json()["error"]["details"]
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "conflict"
+    assert error["details"]["id"] == existing.pk
+    assert set(error["details"]["mismatched_fields"]) == {"full_name", "phone", "national_id", "cooperative"}

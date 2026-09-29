@@ -96,11 +96,23 @@ def test_area_out_of_range_is_rejected(api, plot_payload, area):
     assert "area_hectares" in response.json()["error"]["details"]
 
 
-def test_duplicate_plot_code_is_rejected(api, plot_payload, make_plot):
-    make_plot(plot_code="KWA-P-0417-A")
+def test_identical_plot_resend_replays_without_second_check(api, plot_payload, django_capture_on_commit_callbacks):
+    with patch("apps.registry.tasks.run_risk_check.delay") as delay:
+        with django_capture_on_commit_callbacks(execute=True):
+            first = api.post("/api/plots/", plot_payload, format="json")
+            replay = api.post("/api/plots/", {**plot_payload, "sector": "kigoma"}, format="json")
+    assert first.status_code == 201
+    assert replay.status_code == 200 and replay.headers["Idempotent-Replayed"] == "true"
+    assert replay.json()["id"] == first.json()["id"]
+    delay.assert_called_once()  # the replay does not queue a second registry call
+    assert Plot.objects.count() == 1
+
+
+def test_plot_code_reused_with_different_details_is_a_conflict(api, plot_payload, make_plot):
+    existing = make_plot(plot_code="KWA-P-0417-A")
     response = api.post("/api/plots/", plot_payload, format="json")
-    assert response.status_code == 400
-    assert "plot_code" in response.json()["error"]["details"]
+    assert response.status_code == 409
+    assert response.json()["error"]["details"] == {"id": existing.pk, "mismatched_fields": ["farmer"]}
 
 
 def test_manual_review_queue_filter(api, make_plot, settings):

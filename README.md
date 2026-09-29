@@ -157,7 +157,7 @@ queues it once the broker is back. (Measured locally: 0.49 s with no Redis runni
 ## Tests and quality checks
 
 ```bash
-python -m pytest -q                                   # 90 tests
+python -m pytest -q                                   # 93 tests
 ruff check .                                          # lint
 mypy apps config manage.py                            # static types (django-stubs, drf-stubs)
 python manage.py check
@@ -340,14 +340,19 @@ Once the field errors are fixed, cross-field rules run:
 | 400 | `parse_error` | Malformed JSON |
 | 404 | `not_found` | Unknown id or route, e.g. `{"error": {"code": "not_found", "message": "No Farmer matches the given query.", "details": {}}}` |
 | 405 | `method_not_allowed` | e.g. `DELETE /api/price-schedule/` |
-| 409 | `conflict` | A `client_reference` was reused with a different body (`details.mismatched_fields`), or two requests raced past validation into a DB uniqueness constraint |
+| 409 | `conflict` | A natural key (`member_number`, `plot_code`, or a station's `client_reference`) was reused with different details (`details.mismatched_fields`), or two requests raced past validation into a DB uniqueness constraint |
 | 500 | `server_error` | Unexpected failure. The traceback is logged, never returned. |
 
-Why duplicates are **400**, not 409: a duplicate phone, member number or plot code that validation
-can see is reported against the specific field, so the phone app can highlight it. A **409** is
-reserved for real conflicts with existing data: the rare race where the database constraint, not
-the serializer, catches a duplicate, and a `client_reference` reused with different values. An
-identical resend under the same `client_reference` is neither: it is an idempotent replay (`200`).
+**Resends are replays, not errors.** Every create is idempotent on its natural key: a farmer's
+`member_number`, a plot's `plot_code`, and a delivery's `client_reference` (per station). On 2G a
+phone often resends a request whose response it never received, so:
+
+- An **identical resend** returns the existing record with **200** and `Idempotent-Replayed: true`.
+  Nothing is duplicated, and a plot's risk check is not queued twice.
+- The **same key with different details** is a real conflict: **409**, with
+  `details.mismatched_fields` so the app can show what differs.
+- A duplicate on a *secondary* unique field (for example, a phone number already used by another
+  member) is a **400** validation error on that field, so the app can highlight it.
 
 ### Station delivery feed (cursor-paginated)
 
@@ -466,9 +471,9 @@ Other decisions worth knowing:
 - **DB constraints back up validation:** Rwanda bounding box and area range on plots, the weight
   range on deliveries, one active price schedule per season, one price per grade per schedule, and
   `client_reference` unique per station.
-- **Idempotency:** a replay is detected before validation, so a retry returns the original even if
-  prices have changed since. The replayed body must match the original (plot, weight, grade and
-  date), otherwise the response is `409`. A race between two identical requests is caught by the
+- **Idempotency (farmers, plots and deliveries):** a replay is detected before validation, so a
+  retry returns the original even if prices have changed since. The replayed body must match the
+  original, otherwise the response is `409`. Shared logic lives in `apps/core/idempotency.py`. A race between two identical requests is caught by the
   unique constraint and also returns the original.
 - **Personal data (known F1 limitation):** `national_id` and `phone` are returned in full because
   F1 has no authentication yet. Formative 2 adds roles, masks national IDs to their last four

@@ -18,9 +18,8 @@ from .models import (
     WashingStation,
 )
 from .services import register_farmer, register_plot
+from .validators import normalise_rwandan_phone
 
-# MTN (078/079) and Airtel (072/073) mobile numbers, in local or international form.
-_RW_PHONE = re.compile(r"^(?:\+?250|0)(7[2389]\d{7})$")
 _NATIONAL_ID = re.compile(r"^\d{16}$")
 
 
@@ -32,11 +31,10 @@ class RwandanPhoneField(serializers.CharField):
     """
 
     def to_internal_value(self, data: Any) -> str:
-        raw = re.sub(r"[\s-]", "", super().to_internal_value(data))
-        match = _RW_PHONE.match(raw)
-        if not match:
+        phone = normalise_rwandan_phone(super().to_internal_value(data))
+        if phone is None:
             raise serializers.ValidationError("Enter a Rwandan mobile number such as +250780000000 or 0780000000.")
-        return f"+250{match.group(1)}"
+        return phone
 
 
 class NameRelatedField(serializers.SlugRelatedField):

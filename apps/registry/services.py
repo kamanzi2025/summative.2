@@ -2,6 +2,7 @@
 
 import logging
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.conf import settings
@@ -11,6 +12,7 @@ from django.utils import timezone
 
 from .clients import RiskAssessment
 from .models import AttemptOutcome, Farmer, Plot, RiskCheckAttempt, RiskStatus
+from .validators import normalise_rwandan_phone
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,60 @@ ATTEMPT_SOFT_TIME_LIMIT_SECONDS = int(settings.REGISTRY_API_TIMEOUT) + 30
 
 def register_farmer(data: dict[str, Any]) -> Farmer:
     return Farmer.objects.create(**data)
+
+
+def _text(value: Any) -> str:
+    return " ".join(str(value).split()) if value is not None else ""
+
+
+def _decimal(value: Any) -> Decimal | None:
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return None
+
+
+def find_farmer_replay(data: dict[str, Any]) -> Farmer | None:
+    member_number = data.get("member_number")
+    if not isinstance(member_number, str) or not member_number.strip():
+        return None
+    return Farmer.objects.select_related("home_station").filter(member_number=member_number.strip()).first()
+
+
+def farmer_replay_mismatches(farmer: Farmer, data: dict[str, Any]) -> list[str]:
+    """Fields where a resent registration disagrees with the stored farmer (after normalising)."""
+    mismatched = []
+    if _text(data.get("full_name")) != farmer.full_name:
+        mismatched.append("full_name")
+    if normalise_rwandan_phone(_text(data.get("phone"))) != farmer.phone:
+        mismatched.append("phone")
+    if (_text(data.get("national_id")) or None) != farmer.national_id:
+        mismatched.append("national_id")
+    if _text(data.get("cooperative")) != farmer.cooperative:
+        mismatched.append("cooperative")
+    return mismatched
+
+
+def find_plot_replay(data: dict[str, Any]) -> Plot | None:
+    plot_code = data.get("plot_code")
+    if not isinstance(plot_code, str) or not plot_code.strip():
+        return None
+    return Plot.objects.select_related("sector", "washing_station").filter(plot_code=plot_code.strip()).first()
+
+
+def plot_replay_mismatches(plot: Plot, data: dict[str, Any]) -> list[str]:
+    """Fields where a resent plot registration disagrees with the stored plot."""
+    mismatched = []
+    if _text(data.get("farmer")) != str(plot.farmer_id):
+        mismatched.append("farmer")
+    if _text(data.get("sector")).lower() != plot.sector.name.lower():
+        mismatched.append("sector")
+    if _text(data.get("washing_station")).lower() != plot.washing_station.name.lower():
+        mismatched.append("washing_station")
+    for field in ("latitude", "longitude", "area_hectares"):
+        if _decimal(data.get(field)) != getattr(plot, field):
+            mismatched.append(field)
+    return mismatched
 
 
 def register_plot(data: dict[str, Any]) -> Plot:
