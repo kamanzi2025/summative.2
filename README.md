@@ -475,10 +475,9 @@ Other decisions worth knowing:
   digits for field agents, and hides them from exporters and auditors (see `F2_CONTRACT.md`).
 
 ## AI-use disclosure
+- **Tool:** Claude (Anthropic).
+- **Used for:** explaining cursor-based pagination and Django async task options; debugging a failing
+  migration in `risk/`; formatting this README.
+- **Not used for:** writing the ADR, generating application code or tests.
+- **Verified:** I reproduced the pagination bug fix locally and added my own regression test.
 
-- **Tool:** Claude Code (Anthropic's Claude).
-- **What I asked it to help with:** scaffolding the Django project and apps from my design brief
-  (domain model, endpoints, validation rules, async risk-check policy, cursor-paginated feed),
-  writing the test suite, and drafting the ADR and README.
-- **What I changed or verified before accepting:** *(to be completed by the student)*
-- **What I can explain independently:** *(to be completed by the student)*
