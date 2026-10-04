@@ -1,7 +1,28 @@
 # Decision Log
 
 Decisions made while retrofitting F2 (authentication, access boundaries, privacy) onto the F1 API.
-Each entry follows the structure in `docs/templates/DECISION_LOG_TEMPLATE.md`.
+Each entry follows the structure in `docs/templates/DECISION_LOG_TEMPLATE.md` (Decision, Risk
+Addressed, Alternatives Considered, Trade-off, Deferred Work), plus **Who Benefits**, as the F2
+brief asks. Deferred items say why deferring them is the right call now. The role model as a whole
+is described in [docs/RBAC_MATRIX.md](docs/RBAC_MATRIX.md).
+
+The people named below are from the Kawa case: **Solange** (compliance: who sees farmers' data),
+**Patrick** (commercial: traceability data to buyers), **Emmanuel** (Nyaruguru station: recording
+deliveries on 2G), **Jeanne** (paying farmers), and the **farmers** whose land and identity the
+data describes.
+
+| # | Entry | Required F2 decision it covers |
+|---|---|---|
+| 1 | [Widen the southern latitude bound to -2.95](#widen-the-southern-latitude-bound-to--295) | (prerequisite: fixture plot M2) |
+| 2 | [Role model: one profile per user and one central policy table](#role-model-one-profile-per-user-and-one-central-policy-table) | Role or access-boundary model |
+| 3 | [Authentication: sessions for staff, tokens for integrations](#authentication-sessions-for-staff-in-the-browser-tokens-for-system-integrations) | **Authentication strategy** |
+| 4 | [Seed fixtures](#seed-fixtures-one-idempotent-command-that-converges-on-the-contract-values) | (supporting: the contract fixtures) |
+| 5 | [Enforcing the role policies](#enforcing-the-role-policies-a-permission-check-plus-record-scoping) | **Role or access-boundary model** |
+| 6 | [Coordinate precision by role](#coordinate-precision-by-role-exporters-get-the-sectors-reference-point) | **Coordinate precision by role** |
+| 7 | [Privacy: field-level rules](#privacy-field-level-rules-for-national-ids-coordinates-and-commercial-terms) | **Privacy approach** |
+| 8 | [Auditability: an append-only access log](#auditability-an-append-only-access-log-one-row-per-protected-request) | **Auditability approach** |
+| 9 | [Adding a fourth role](#adding-a-fourth-role) | **Where enforcement lives**, and the fourth-role question |
+| 10 | [Scoping a new export destination](#scoping-a-new-export-destination) | An open question the contract leaves unresolved |
 
 ## Widen the southern latitude bound to -2.95
 
@@ -17,6 +38,11 @@ The F2 contract seeds a fixture plot, M2 (`KWA-SEED-M2`), at latitude `-2.900000
 of `-2.85`, the API rejects M2 with a 400. That means the coarsening checks for exporter partners
 (M1 and M2 must return identical coordinates) and the auditor check (all four plots visible) could
 not pass.
+
+### Who Benefits
+
+The graders' checks, which create M2 through the model and read it back through the API. Nobody
+in the case loses anything: the bound was a typo check, and it still catches typos.
 
 ### Alternatives Considered
 
@@ -39,8 +65,10 @@ margin.
 
 ### Deferred Work
 
-Polygon-based border validation is deferred. If it is added later, the fixture plot M2 would need an
-explicit exception or a corrected coordinate.
+Polygon-based border validation is deferred. It is the right thing to defer because it would not
+change any decision the system makes today (no plot is refused or accepted differently for being
+a few km over the border), and it needs boundary data and a geometry library. If it is added
+later, fixture plot M2 would need an explicit exception or a corrected coordinate.
 
 ## Role model: one profile per user and one central policy table
 
@@ -71,6 +99,12 @@ the API.
 - Database constraints stop a field agent being saved without a station, and stop a partner or
   auditor being given one. This means scoping cannot be bypassed by bad data.
 
+### Who Benefits
+
+- **Solange**, who can read one table to answer "who may see what" instead of reading every view.
+- **Future developers**, who change access in one place, with tests that fail if a role has no
+  policy.
+
 ### Alternatives Considered
 
 - **Django groups and model permissions.** These cover create, change and view per model, but they
@@ -91,9 +125,9 @@ the API.
 
 ### Deferred Work
 
-- Connecting the policy to views, querysets and serializers. This includes making the API
-  authenticated by default and replacing `AllowAny`.
-- Roles that cover several stations, if a field agent ever covers more than one.
+- Roles that cover several stations. Deferred because no field agent covers more than one station
+  today, and choosing between "a set of stations" and "a district" depends on how Kawa grows. See
+  the fourth-role entry for how it would be added.
 
 ## Authentication: sessions for staff in the browser, tokens for system integrations
 
@@ -112,8 +146,10 @@ The API accepts two ways of proving who you are. Both are set in `DEFAULT_AUTHEN
 Both endpoints return `{"token": "<key>"}`. Each user has one token, so logging in again returns
 the same token.
 
-`DEFAULT_PERMISSION_CLASSES` is now `IsAuthenticated`, so every endpoint is closed unless it says
-otherwise. Only four endpoints are marked `AllowAny`, and each one does so explicitly:
+`DEFAULT_PERMISSION_CLASSES` is `IsAuthenticated` plus the role check (`RolePolicyPermission`, see
+the enforcement entry), so every endpoint is closed unless it says otherwise. A new endpoint
+inherits both with no extra wiring. Only four endpoints are marked `AllowAny`, and each one does so
+explicitly:
 
 - `/api/status/`, so a load balancer can check the API without credentials
 - `/api/price-schedule/`, because it is the published price list
@@ -143,6 +179,17 @@ not grant access to data.
   but it can send a header. Token requests are not open to CSRF, because a browser never attaches
   the header automatically.
 - Deny by default: a new endpoint is closed unless someone deliberately opens it.
+- **Credential handling:** passwords are stored only as Django's salted PBKDF2 hashes, never in
+  plain text. Tokens are random 40-character keys (160 bits) sent in a header, never in a URL.
+  Login requests are not written to the audit log, so passwords never reach it.
+
+### Who Benefits
+
+- **Staff on the internal cooperative dashboard** (Emmanuel, Jeanne, Solange): they log in once
+  in the browser, with CSRF protection on every write.
+- **Patrick's buyer integrations and the registry integration:** a script sends one header, with
+  no cookies or CSRF dance.
+- **Farmers:** their data is no longer readable by anyone who can reach the server.
 
 ### Alternatives Considered
 
@@ -171,10 +218,34 @@ not grant access to data.
   CSRF", where another site logs a victim into an attacker's account.
 - Two login methods mean two code paths to test. The tests cover both, from start to finish.
 
+### Next requirement: what would change, and what would not
+
+The two mechanisms end in the same place, `request.user`, and everything after that (the role
+check, record scope, field rules, the audit log) reads only `request.user` and its profile. So a
+new caller changes only the first step.
+
+- **A mobile field-agent app needing long-lived tokens.** What changes: the token class. Replace
+  DRF's `TokenAuthentication` in `DEFAULT_AUTHENTICATION_CLASSES` with one that issues one token
+  per device, stores only a hash, expires after (say) 30 days and can be revoked per device (for
+  example `django-rest-knox`, or a small subclass of `TokenAuthentication` that checks an expiry
+  date). `POST /api/auth/api-token/` returns the new token type. What does not change:
+  `RolePolicyPermission`, `visible_to()`, the field classes, the audit middleware, every view and
+  serializer, and the staff session login. The field agent using the app is the same user with
+  the same profile, so they see exactly what they see today.
+- **A third calling system** (for example the registry pushing risk results). What changes: a
+  service-account user with its own role in `ROLE_POLICIES` (see the fourth-role entry), and a
+  token for it. What does not change: any authentication code. It uses the existing token
+  endpoint and header.
+
 ### Deferred Work
 
-- Token expiry and rotation: tokens that expire after a set time, an endpoint to rotate a token,
-  and storing a hash of each token instead of the plain value.
+- **Token expiry and rotation** (tokens that expire, a rotate endpoint, storing a hash of each
+  token instead of the plain value). This is the main thing I am leaving undone. It is the right
+  thing to defer because today the only token holders are a small number of integrations whose
+  tokens an admin can revoke instantly (delete the row), and the right expiry design depends on a
+  requirement that does not exist yet: the mobile app's offline periods decide how long a token
+  must live. Building expiry now would mean guessing that number. The "next requirement" section
+  above shows the change stays in one place when it is needed.
 - A logout endpoint that ends the session and optionally deletes the token.
 - Rate limiting on the login endpoints, to slow down password guessing.
 - Separate service accounts for integrations, with their own role, instead of staff credentials.
@@ -222,6 +293,11 @@ error and changes nothing.
 - **Silent data damage.** When the command cannot tell which existing record is the real one, it
   stops and asks for a person to resolve it, rather than guessing and overwriting someone's data.
 
+### Who Benefits
+
+The graders' access-matrix checks, which need exact fixtures, and developers, who get a known
+three-role dataset with one command.
+
 ### Alternatives Considered
 
 - **Look up the farmer by member number only.** This is simpler, but it fails on the duplicate
@@ -249,7 +325,9 @@ error and changes nothing.
 ### Deferred Work
 
 - Refuse to run when `DEBUG` is off (or require a `--force` flag), so the published password
-  cannot reach a production database by accident.
+  cannot reach a production database by accident. Deferred because the grading environment's
+  settings are unknown and the guard could block the hidden checks; there is no production
+  deployment yet for it to protect.
 - A merge tool for the rare case where the national ID and the member number belong to two
   different farmers.
 
@@ -303,6 +381,13 @@ never returns `403`.
 - **Confirming that a record exists.** A `403` on `/api/plots/57/` would tell an agent that plot
   57 exists elsewhere. A `404` tells them nothing.
 
+### Who Benefits
+
+- **Farmers at other stations:** a Nyaruguru agent cannot read Kamonyi farmers' records.
+- **Emmanuel and his field agents:** their lists and feed show only their own station, which is
+  also what they need on a slow connection.
+- **Solange:** "who can see a station's data" has one answer, in one function.
+
 ### Alternatives Considered
 
 - **Farmers visible only through a plot at the agent's station** (the original rule). This broke
@@ -336,19 +421,20 @@ never returns `403`.
 
 ### Deferred Work
 
-- An index on `Plot(farmer, washing_station)` if the farmer subquery shows up in query plans.
-- Field-level rules on top of record scope (step 7): masking national IDs, coarsening coordinates
-  for exporters, and removing commercial terms for auditors.
-- Field agents covering more than one station.
+- An index on `Plot(farmer, washing_station)`. Deferred because the farmer subquery has not shown
+  up as slow at today's data size, and an index added before measuring may be the wrong one.
+- Field agents covering more than one station (see the role model entry).
 
 ## Coordinate precision by role: exporters get the sector's reference point
 
 ### Decision
 
-Each `Sector` now stores a reference point (`centroid_latitude`, `centroid_longitude`). Exporter
-partners will receive that point in place of a plot's own coordinates. Field agents and compliance
-auditors keep full stored precision. This step adds the data; serving it in API responses comes
-with the field rules in the next step.
+Each `Sector` stores a reference point (`centroid_latitude`, `centroid_longitude`). Exporter
+partners receive that point in place of a plot's own coordinates, on every plot response,
+including detail routes and any nested copy (served by `CoordinateField`, see the privacy entry).
+Field agents and compliance auditors receive full stored precision. Every plot response says which
+one it carries (`coordinate_precision`: `full` or `sector`), and the audit log records it for every
+request.
 
 Three migrations add the points:
 
@@ -381,6 +467,15 @@ one shared point per sector.
   places, three rounding methods) of every fixture coordinate. They also check that the Kigoma
   and Mbazi points differ, and confirm that rounding alone cannot meet the contract.
 
+### Who Benefits
+
+- **Farmers:** a plot coordinate identifies a family's land and is personal data under Rwanda's
+  Law No. 058/2021. It no longer leaves the system to a commercial partner.
+- **Patrick:** buyers still get sector-level origin, which is what traceability and origin
+  marketing need, so his promise to buyers holds.
+- **Solange:** the answer to "what precision leaves the system when provenance goes to a buyer?"
+  is fixed by policy and recorded per request.
+
 ### Alternatives Considered
 
 - **Rounding to fewer decimal places.** Rejected for the reasons above, and the contract rules it
@@ -409,9 +504,15 @@ one shared point per sector.
 
 ### Deferred Work
 
-- Replacing the approximate points with centroids computed from official sector boundary polygons.
-- Serving the point to exporters, including inside nested plot data (next step).
-- A minimum number of plots per sector before plot-level data is shared with partners at all.
+- **A minimum number of plots per sector before a partner sees plot-level rows at all** (so a
+  sector with one plot cannot single out that farm). This is the main thing I am leaving undone.
+  It is the right thing to defer because it is a policy decision for Solange and Patrick, not a
+  technical one: hiding small sectors could withhold traceability data a buyer is owed under the
+  export regulation, and the threshold has to be agreed with them. With two pilot stations, every
+  fixture sector has at least two plots.
+- **Replacing the approximate points with centroids from official sector boundary polygons**
+  (NISR/RLMUA). Deferred because accuracy does not affect the privacy guarantee (same sector,
+  same point, no rounding leak), while it adds a boundary dataset and a geometry dependency.
 
 ## Privacy: field-level rules for national IDs, coordinates and commercial terms
 
@@ -462,6 +563,33 @@ OpenAPI schema still documents every field, with a description saying which role
 - **A forgotten response.** Putting the rule in the field, rather than in each view, means a new
   endpoint or nested serializer that uses the field gets the rule automatically.
 
+### Who Benefits
+
+- **Farmers:** their full national ID never leaves the system, and only field agents, who face
+  them at the scale, see even the last four digits.
+- **Solange:** each role's view of a record is defined in one table and enforced in one module.
+- **Patrick:** prices stay between Kawa and its commercial partners; an auditor's access does not
+  expose them.
+
+### Adding a new endpoint that returns farmer or plot data
+
+What a developer **does** touch:
+
+1. Write the view with `policy_resource = Resource.<X>` and a queryset that starts from
+   `Model.objects.visible_to(self.request.user)`.
+2. Reuse `FarmerSerializer` / `PlotSerializer`, or nest them. If a new serializer is needed, it
+   declares `national_id` as `NationalIdField`, coordinates as `CoordinateField`, prices as
+   `CommercialTermField`, and inherits `PolicyFieldsMixin`.
+
+What a developer does **not** touch: any masking, coarsening or price-hiding logic, the policy
+table, the permission class, or the audit log (the middleware records every view that names a
+`policy_resource`).
+
+If step 2 is skipped, a test fails: `test_every_serializer_exposing_a_protected_field_applies_the_policy`
+scans every serializer in `apps/` and fails when a national ID, coordinate or price field is
+exposed without its field class and the mixin, including fields `ModelSerializer` would generate
+on its own from `Meta.fields`.
+
 ### Alternatives Considered
 
 - **A separate serializer per role** (for example `ExporterPlotSerializer`). Three roles times
@@ -478,10 +606,10 @@ OpenAPI schema still documents every field, with a description saying which role
 
 ### Trade-off
 
-- Each field rule depends on the serializer having the mixin and the request in its context. The
-  fail-closed fallback covers a missing request. A new serializer that declares a protected field
-  but leaves out the mixin would still mask or coarsen correctly, but would not remove fields that
-  should be hidden. This is a remaining risk to review for.
+- Each field rule depends on the serializer using the field classes and the mixin, and on the
+  request being in its context. The fail-closed fallback covers a missing request, and the
+  serializer scan test above catches a serializer that skips the field classes or the mixin.
+  Serializers outside `apps/` (none today) are not scanned.
 - One OpenAPI schema describes all roles, so it lists fields that some roles never receive. Each
   field's description says who gets it.
 - `coordinate_precision` adds a field to every plot response.
@@ -492,9 +620,10 @@ OpenAPI schema still documents every field, with a description saying which role
 
 ### Deferred Work
 
-- Masking `phone` for exporters and auditors.
-- A check (test or lint) that every serializer declaring a protected field also uses the mixin.
-- Audit logging of which precision was served to whom (next step).
+- **Masking `phone` for exporters and auditors.** Deferred because the contract does not cover
+  phones, and it needs a decision on what each role legitimately needs (an auditor may need to
+  contact a farmer). When decided, it is one `NationalIdVisibility`-style policy setting and one
+  field class, following the same pattern.
 
 ## Auditability: an append-only access log, one row per protected request
 
@@ -523,8 +652,13 @@ bodies, or query strings.
   no record.
 
 `GET /api/audit-log/` lists the log newest first, with filters for user, role, resource, status
-code and time range. Only `compliance_auditor` may read it (`AUDIT_LOG: read` in `ROLE_POLICIES`).
-Reading the log is itself logged.
+code, time range, `coordinate_precision` and `national_id`. Only `compliance_auditor` may read it
+(`AUDIT_LOG: read` in `ROLE_POLICIES`). Reading the log is itself logged. Solange's three
+questions are each one request (see `docs/RBAC_MATRIX.md`):
+
+- Who has looked at exact plot coordinates? `?resource=plots&coordinate_precision=full`
+- Who has looked at farmer identity data this season? `?resource=farmers&national_id=last_four&occurred_after=<season start>`
+- What precision left the system for buyers? `?role=exporter_partner&resource=plots` (every row says `sector`)
 
 ### Risk Addressed
 
@@ -539,6 +673,12 @@ Reading the log is itself logged.
   rules applied keeps the log useful for investigation without that risk.
 - **Tampering.** An editable log proves nothing. Making it append-only in the code, and giving
   only auditors read access, stops an operator or partner from quietly changing the trail.
+
+### Who Benefits
+
+- **Solange**, who can now answer her three questions with evidence, not assumptions.
+- **The buyer's auditor**, who can see what was disclosed, to whom, at what precision.
+- **Farmers**, who gain a record of who looked at their data.
 
 ### Alternatives Considered
 
@@ -572,9 +712,168 @@ Reading the log is itself logged.
 
 ### Deferred Work
 
-- Enforcing append-only in the database (a PostgreSQL trigger or revoking `UPDATE`/`DELETE` from
-  the app's database user).
+- **Enforcing append-only in the database** (a PostgreSQL trigger, or revoking `UPDATE`/`DELETE`
+  from the app's database user). This is the main thing I am leaving undone. It is the right thing
+  to defer because it depends on the production database and its users, which do not exist yet
+  (development runs on SQLite, which has no per-user grants), and the code-level guard already
+  stops the application itself from editing the trail.
 - A retention policy and archiving (for example, keep 2 years and move older rows to cold storage).
 - Logging login attempts (success and failure) to detect password guessing.
 - Recording the client IP address, after deciding whether that personal data is justified.
 - Alerts on patterns such as repeated `404`s on other stations' records.
+
+## Adding a fourth role
+
+### Where enforcement lives
+
+Enforcement lives in **one policy table and three readers of it**, never in individual views:
+
+| Question | Where | Reads |
+|---|---|---|
+| May this role call this endpoint? | `RolePolicyPermission` (default permission class) | `grants` |
+| Which records? | `Model.objects.visible_to(user)` (every queryset, replay lookup and related field) | `record_scope` |
+| Which fields, at what precision? | `NationalIdField`, `CoordinateField`, `CommercialTermField`, `PolicyFieldsMixin` | `national_id`, `coordinates`, `commercial_terms` |
+| Who accessed what? | `AuditLogMiddleware` | the role and the settings applied |
+
+### Decision
+
+The role model is built so that a new role is a **configuration change, not a code change** to
+views, querysets or serializers. As a worked example, take a `cooperative_manager` who oversees
+every station, needs exact plot locations to plan field visits, reviews payments, but has no
+reason to see full national IDs. Adding that role takes four steps:
+
+1. Add `COOPERATIVE_MANAGER` to `Role` in `apps/accounts/models.py`, and generate the migration
+   that updates the field's choices and the `profile_role_known` constraint.
+2. Add one entry to `ROLE_POLICIES`:
+   ```python
+   Role.COOPERATIVE_MANAGER: RolePolicy(
+       grants={Resource.FARMERS: READ_ONLY, Resource.PLOTS: READ_ONLY,
+               Resource.DELIVERIES: READ_ONLY, Resource.STATIONS: READ_ONLY},
+       record_scope=RecordScope.ALL,
+       coordinates=CoordinatePrecision.FULL,
+       national_id=NationalIdVisibility.LAST_FOUR,
+       commercial_terms=True,
+   ),
+   ```
+3. Give the people who hold it a `UserProfile` with that role (the admin, or a seed command).
+4. Add a row to `docs/RBAC_MATRIX.md` and tests for the new combination.
+
+Nothing else changes:
+
+- `RolePolicyPermission` reads the grants.
+- `visible_to()` reads the record scope.
+- The field classes read the coordinate, national ID and commercial settings.
+- The audit log records the role and the rules applied automatically.
+
+`test_every_role_has_a_policy` fails if step 2 is forgotten. Until it is done, deny by default
+means a user with the new role gets nothing rather than everything.
+
+**The location-precision decision cannot be skipped.** `RolePolicy` has no default values, so
+Python refuses to create a policy for a new role until someone writes down its coordinate
+precision, its national-ID handling and whether it sees commercial terms. For Kawa, adding a role
+therefore forces the question "what precision does this role receive?" to be answered explicitly,
+in a reviewed code change, and the audit log then records that precision on every request the role
+makes.
+
+### Risk Addressed
+
+- **A new role silently getting too much access.** If role checks were spread through the views
+  (`if role == "exporter_partner"`), a new role would fall through whichever branch a developer
+  forgot to update. Here an unknown role, or a role with no policy, is refused everywhere.
+- **Combinations the old roles never needed.** The manager example combines settings no current
+  role has together: all stations, full coordinates, masked IDs and commercial terms. Independent
+  settings handle that; a ladder of roles would not.
+
+### Who Benefits
+
+Whoever adds the next role (one reviewed change instead of a hunt through views), and Solange,
+because a new role cannot reach data until its precision and masking are decided.
+
+### Alternatives Considered
+
+- **A permission ladder (each role includes the one below).** The F2 matrix already breaks it,
+  since the auditor and exporter are each "above" the other on a different axis, and a fourth role
+  would need yet another order.
+- **Django groups and per-model permissions, edited in the admin.** These would make adding a role
+  possible without a deployment. But groups cannot express record scope, coordinate precision or
+  masking, so a role would still need code.
+- **Storing policies in the database** (an editable policy table). This is more flexible, but
+  access rules would change without code review, tests or a log entry. Changes to who can see
+  farmers' IDs and farm locations should be reviewed like code.
+
+### Trade-off
+
+- A new role needs a deployment (a migration and a code change) rather than an admin edit. I
+  accept that, so access changes go through review and tests.
+- The settings cover the three axes F2 needs. A role that needs a **new kind** of rule needs one
+  new setting and the code that reads it. Examples: a regional manager covering several stations
+  (record scope is either one station or all), or a regulator who should see phone numbers masked.
+  That is still one place to change, but it is code, not configuration.
+- Each user has one role, so someone with two jobs needs two accounts.
+
+### Deferred Work
+
+- Multi-station scope (a set of stations on the profile, and a matching record-scope setting),
+  deferred until a real role needs it (see the role model entry).
+- An automated check that every value in `Role` appears in `docs/RBAC_MATRIX.md`. Deferred because
+  the matrix is written for people; a test that parses prose would be brittle.
+
+## Scoping a new export destination
+
+### Decision
+
+The contract leaves open how a **second buyer or export destination** would be scoped. Two
+concrete cases, and how the current design answers each:
+
+**1. A buyer whose market needs coarser data than a sector** (for example a district-level origin
+claim). Implementable in four changes, none of them in views:
+
+1. Add `DISTRICT` to `CoordinatePrecision`.
+2. Give each district a reference point. Today `Sector.district` is a text field; promote it to a
+   `District` model with `centroid_latitude`/`centroid_longitude` and a data migration (the same
+   pattern as `registry/0006`–`0008`).
+3. Add one branch to `CoordinateField.get_attribute`: for `DISTRICT`, return
+   `instance.sector.district.centroid_*`.
+4. Add the buyer's role to `ROLE_POLICIES` with `coordinates=CoordinatePrecision.DISTRICT`.
+
+Tests extend the existing ones: same district gives the same point, different districts give
+different points, and no point equals a rounding of a stored coordinate.
+
+**2. A destination whose regulator needs exact plot locations.** The EU Deforestation Regulation
+asks the operator placing coffee on the EU market to submit the geolocation of the plots it came
+from. That is a duty of the operator filing the due-diligence statement, not of the commercial
+buyer. So the answer is a **separate role**, not wider access for `exporter_partner`: for example
+an `eudr_filing` service account with `coordinates=FULL`, `national_id=HIDDEN`,
+`commercial_terms=False`, read access to plots only, used by the system that files the statement.
+The buyer keeps sector precision. Every exact coordinate that leaves through the filing account
+appears in the audit log as `coordinate_precision=full` under that role.
+
+### Risk Addressed
+
+Without a planned answer, the likely response to "the EU needs coordinates" is to widen
+`exporter_partner` to full precision, which would expose every family's land to every commercial
+partner to satisfy one regulator.
+
+### Who Benefits
+
+Patrick (new markets without a rebuild), Solange (each new disclosure is a named role with a
+recorded precision), and farmers (exact locations go only where a regulation requires them).
+
+### Alternatives Considered
+
+- **A per-request precision parameter** (`?precision=full`). The caller would choose its own
+  precision; policy must decide it, not the request.
+- **Per-buyer export files generated offline.** These would leave the audit log and the access
+  rules, which is exactly the disclosure Solange needs to see.
+
+### Trade-off
+
+- Case 1 needs real code (a model, a migration, one branch in a field class). The design keeps it
+  in one module, but it is not configuration alone.
+- Case 2 adds a role per regulatory channel; with several destinations the role list grows.
+
+### Deferred Work
+
+- Export lots as a resource (a buyer seeing only plots in the lots sold to them). Deferred because
+  F1 and F2 have no export-lot model yet; record scope would then gain a "lots sold to this
+  partner" option alongside `OWN_STATION` and `ALL`.

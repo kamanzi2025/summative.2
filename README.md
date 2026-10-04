@@ -5,10 +5,13 @@ cherry deliveries at washing stations (starting with Nyaruguru), pays farmers fr
 season's price schedule, and checks every plot against an external deforestation-risk registry
 **in the background**, so a slow or broken registry never stops a farmer being paid.
 
-This is the Formative 1 (F1) milestone of the `2793` Advanced Python assessment. The same
-repository continues into F2 (auth, RBAC, location privacy) and the Summative.
+This repository covers the Formative 1 (F1) and Formative 2 (F2) milestones of the `2793` Advanced
+Python assessment, and continues into the Summative. F2 retrofits authentication, role-based access
+(field agents, exporter partners, compliance auditors), location and ID privacy, and an access
+audit log onto the F1 API, without changing its paths.
 
-- **Architecture decisions:** [ADR.md](ADR.md)
+- **F2 decisions:** [DECISION_LOG.md](DECISION_LOG.md) · **Role model:** [docs/RBAC_MATRIX.md](docs/RBAC_MATRIX.md)
+- **Architecture decisions (F1):** [ADR.md](ADR.md)
 - **OpenAPI schema:** [schema.yml](schema.yml), live at `/api/schema/`, Swagger UI at `/api/docs/`
 - **Autograding contracts:** [F1](docs/autograding/F1_CONTRACT.md) ·
   [Runtime](docs/autograding/RUN_CONTRACT.md) · [F2](docs/autograding/F2_CONTRACT.md) ·
@@ -22,11 +25,12 @@ repository continues into F2 (auth, RBAC, location privacy) and the Summative.
 4. [Environment variables](#environment-variables)
 5. [Running Redis, the worker and beat](#running-redis-the-celery-worker-and-beat)
 6. [Tests and quality checks](#tests-and-quality-checks)
-7. [API reference with curl examples](#api-reference-with-curl-examples)
-8. [Performance: the station delivery feed](#performance-the-station-delivery-feed)
-9. [Design notes](#design-notes)
-10. [Development history](#development-history)
-11. [AI-use disclosure](#ai-use-disclosure)
+7. [Authentication and roles (F2)](#authentication-and-roles-f2)
+8. [API reference with curl examples](#api-reference-with-curl-examples)
+9. [Performance: the station delivery feed](#performance-the-station-delivery-feed)
+10. [Design notes](#design-notes)
+11. [Development history](#development-history)
+12. [AI-use disclosure](#ai-use-disclosure)
 
 ## Architecture
 
@@ -48,10 +52,16 @@ flowchart LR
 | `apps/registry/` | `Sector`, `WashingStation`, `Farmer`, `Plot`, `RiskCheckAttempt`; registry client (`clients.py`); Celery tasks (`tasks.py`); services |
 | `apps/pricing/` | `PriceSchedule` / `PriceEntry` (one active schedule per season), `/api/price-schedule/` |
 | `apps/deliveries/` | `Delivery` (plot-linked, price and risk snapshots, idempotency key), station feed |
-| `tests/` | pytest suite, including a mirror of the F1 contract's exact payloads |
+| `apps/accounts/` | F2: `UserProfile` (role + station), `ROLE_POLICIES`, permission class, `visible_to()` scoping, field rules (masking, coarsening), login endpoints, `seed_rbac_fixtures` |
+| `apps/audit/` | F2: append-only `AuditLog`, the middleware that writes it, `/api/audit-log/` |
+| `tests/` | pytest suite, including mirrors of the F1 contract payloads and the F2 access matrix |
 
 Views are thin. Validation lives in serializers (field and cross-field `validate()`), and
 business operations live in each app's `services.py`, which both views and Celery tasks call.
+Access control has four layers, each answering one question: the permission class (may this role
+call this endpoint?), the queryset (`visible_to(user)`: which records?), serializer fields (which
+fields, at what precision?), and the audit middleware (who saw what?). See
+[docs/RBAC_MATRIX.md](docs/RBAC_MATRIX.md).
 
 **Request flow for a new plot:** `POST /api/plots/` → the serializer validates it → the
 `register_plot` service saves it with `risk_status="pending"` → `201` is returned in
@@ -78,12 +88,20 @@ source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env                 # defaults work for local SQLite
-python manage.py migrate             # also seeds sectors, stations and the 2026A price schedule
+python manage.py migrate             # also seeds sectors (with reference points), stations, prices
+python manage.py seed_rbac_fixtures  # the three role users + F2 fixture farmer, plots, deliveries
 python manage.py seed_demo           # optional: demo farmers, plots and deliveries (idempotent)
 python manage.py runserver
 ```
 
-Then open <http://127.0.0.1:8000/api/docs/> for Swagger UI.
+Then open <http://127.0.0.1:8000/api/docs/> for Swagger UI. Every endpoint except
+`/api/status/`, `/api/price-schedule/` and the two login endpoints needs a logged-in user with a
+role; see [Authentication and roles](#authentication-and-roles-f2).
+
+`seed_rbac_fixtures` is safe to run repeatedly (it updates rather than duplicates) and writes
+directly to the database, so it needs no Redis or worker. It creates `field_agent_user`
+(Nyaruguru), `exporter_user` and `auditor_user`, all with password `GraderPass123!`. These are
+**test accounts with a published password: never run it against a production database.**
 
 `migrate` runs data migrations that create the **reference data** the API refers to by name:
 sectors (Kigoma, Mbazi, Kibeho, Ngera, Ruheru, Runda), washing stations **Nyaruguru** (`NYR`) and
@@ -180,29 +198,154 @@ registry client is mocked. What the suite covers:
 | Cursor pagination shape, `next` link, stability under inserts, query count, `EXPLAIN` uses the composite index, `since`/grade/risk/exportable filters | `tests/test_feed.py` |
 | Task success, retries, capped backoff (3 h worst case), soft time limit → `timeout` + retry, exhaustion → `unverified`, unique attempt numbers, idempotency, sweeper (including abandoned attempts), simulated registry | `tests/test_risk_checks.py` |
 | Price-schedule shape and cache header, one-active-schedule constraint, error envelope (400/404/405) | `tests/test_pricing_and_errors.py` |
+| F2: login endpoints, session and token auth, CSRF on session writes, anonymous `401` everywhere | `tests/test_auth.py` |
+| F2: `ROLE_POLICIES` (deny by default, read-only roles, matrix values), profile constraints | `tests/test_role_policies.py` |
+| F2: `seed_rbac_fixtures` values and idempotency, national-ID collision, no Celery job | `tests/test_seed_rbac_fixtures.py` |
+| F2: permission matrix, station scoping on lists, detail routes, sub-routes, writes and replays | `tests/test_access_scoping.py` |
+| F2: sector reference points never equal a rounding of a fixture coordinate | `tests/test_sector_centroids.py` |
+| F2: national-ID masking, exporter coarsening (incl. nested copies), auditor without prices | `tests/test_field_rules.py` |
+| F2: one append-only audit row per protected request, never coordinates, auditor-only endpoint | `tests/test_audit_log.py` |
 
 CI (`.github/workflows/ci.yml`) runs ruff (lint and format), mypy, `check`, the migration check, schema freshness and
 pytest on every push to `main`.
 
+## Authentication and roles (F2)
+
+**Two ways to log in, one `request.user`.**
+
+| Who | Endpoint | Then send |
+|---|---|---|
+| Staff in a browser or the admin | `POST /api/auth/staff-login/` | the `sessionid` cookie it sets (and the CSRF token on writes) |
+| System integrations and scripts | `POST /api/auth/api-token/` | `Authorization: Token <key>` |
+
+Both take `{"username", "password"}` and return `{"token": "<key>"}`. Logging in only proves who
+you are. What you may see comes from your **role** (`UserProfile`), and a user without one is
+refused (`403`) on every protected endpoint.
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/auth/api-token/ -H 'Content-Type: application/json' \
+  -d '{"username": "exporter_user", "password": "GraderPass123!"}' | python -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+curl -s http://127.0.0.1:8000/api/plots/ -H "Authorization: Token $TOKEN"
+```
+
+**The roles** (full matrix and reasoning in [docs/RBAC_MATRIX.md](docs/RBAC_MATRIX.md)):
+
+| Role | Sees | Writes | National ID | Plot coordinates | Prices | Audit log |
+|---|---|---|---|---|---|---|
+| `field_agent` | own washing station only | farmers, plots, deliveries at own station | last 4 digits | full | yes | no |
+| `exporter_partner` | all stations | nothing | absent | sector reference point | yes | no |
+| `compliance_auditor` | all stations | nothing | absent | full | absent | read |
+
+### Example requests per role
+
+Real responses from a freshly migrated database after `seed_rbac_fixtures` (lists trimmed to the
+rows that show the difference).
+
+**No credentials:** every protected endpoint is `401`.
+
+```bash
+curl -s http://127.0.0.1:8000/api/plots/
+```
+```json
+{"error": {"code": "not_authenticated", "message": "Authentication credentials were not provided.", "details": {}}}
+```
+
+**`field_agent_user` (Nyaruguru):** only the Nyaruguru plots, full coordinates, national ID masked.
+
+```bash
+curl -s http://127.0.0.1:8000/api/plots/ -H "Authorization: Token $AGENT_TOKEN"
+curl -s http://127.0.0.1:8000/api/farmers/ -H "Authorization: Token $AGENT_TOKEN"
+```
+```json
+{"results": [{"plot_code": "KWA-SEED-K2", "sector": "Kigoma", "washing_station": "Nyaruguru",
+              "latitude": "-2.660000", "longitude": "29.790000", "coordinate_precision": "full", "...": "..."},
+             {"plot_code": "KWA-SEED-K1", "sector": "Kigoma", "washing_station": "Nyaruguru",
+              "latitude": "-2.540000", "longitude": "29.710000", "coordinate_precision": "full", "...": "..."}]}
+{"results": [{"id": 1, "full_name": "Uwimana Béatrice", "member_number": "KWA-F-SEED-01",
+              "phone": "+250788999001", "national_id": "************6789", "home_station": null, "...": "..."}]}
+```
+
+Another station's record is `404`, exactly like one that does not exist:
+
+```bash
+curl -s http://127.0.0.1:8000/api/plots/3/ -H "Authorization: Token $AGENT_TOKEN"   # KWA-SEED-M1, Kamonyi
+```
+```json
+{"error": {"code": "not_found", "message": "No Plot matches the given query.", "details": {}}}
+```
+
+**`exporter_user`:** every station, but each plot reports its sector's reference point, so plots
+in one sector are indistinguishable. No `national_id` field at all. Writes are refused.
+
+```bash
+curl -s http://127.0.0.1:8000/api/plots/ -H "Authorization: Token $EXPORTER_TOKEN"
+curl -s -X POST http://127.0.0.1:8000/api/farmers/ -H "Authorization: Token $EXPORTER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+```json
+{"results": [{"plot_code": "KWA-SEED-M2", "sector": "Mbazi", "latitude": "-2.616000", "longitude": "29.673000", "coordinate_precision": "sector", "...": "..."},
+             {"plot_code": "KWA-SEED-M1", "sector": "Mbazi", "latitude": "-2.616000", "longitude": "29.673000", "coordinate_precision": "sector", "...": "..."},
+             {"plot_code": "KWA-SEED-K2", "sector": "Kigoma", "latitude": "-2.556000", "longitude": "29.688000", "coordinate_precision": "sector", "...": "..."},
+             {"plot_code": "KWA-SEED-K1", "sector": "Kigoma", "latitude": "-2.556000", "longitude": "29.688000", "coordinate_precision": "sector", "...": "..."}]}
+{"error": {"code": "permission_denied", "message": "Your role does not allow this.", "details": {}}}
+```
+
+**`auditor_user`:** every station, full coordinates, deliveries without `unit_price_rwf` or
+`amount_due_rwf`, and the audit log.
+
+```bash
+curl -s http://127.0.0.1:8000/api/deliveries/ -H "Authorization: Token $AUDITOR_TOKEN"
+curl -s 'http://127.0.0.1:8000/api/audit-log/?page_size=1' -H "Authorization: Token $AUDITOR_TOKEN"
+```
+```json
+{"results": [{"id": 2, "client_reference": "seed-rbac-M1", "washing_station": "Kamonyi", "plot": 3,
+              "plot_code": "KWA-SEED-M1", "farmer_name": "Uwimana Béatrice", "weight_kg": "38.50",
+              "grade": "A", "delivered_on": "2026-03-14", "recorded_at": "2026-10-04T20:33:11.300311+02:00",
+              "is_exportable": false}, "..."]}
+{"results": [{"id": 12, "occurred_at": "2026-10-04T20:33:27.272891+02:00", "username": "exporter_user",
+              "role": "exporter_partner", "method": "POST", "path": "/api/farmers/", "endpoint": "farmer-list",
+              "status_code": 403, "resource": "farmers", "object_ids": [], "coordinate_precision": "sector",
+              "national_id": "hidden", "commercial_terms": true}]}
+```
+
+### The audit log
+
+Every request to a protected endpoint, including refused ones, writes one append-only `AuditLog`
+row: user, role, route, status, the IDs of the records returned, and the field rules applied
+(coordinate precision, national-ID handling, whether prices were included). It never stores
+coordinates, national IDs, prices, bodies or query strings. `GET /api/audit-log/` (auditors
+only) filters by `username`, `role`, `resource`, `status_code`, `coordinate_precision`,
+`national_id`, `occurred_after` and `occurred_before`, so each of the brief's three questions is
+one request (for example "who saw exact coordinates?" is
+`?resource=plots&coordinate_precision=full`). See
+[docs/RBAC_MATRIX.md](docs/RBAC_MATRIX.md#solanges-three-questions).
+
 ## API reference with curl examples
 
 Base URL: `http://127.0.0.1:8000`. All bodies are JSON. Money and weights are **decimal strings**,
-never floats.
+never floats. Since F2, every request below except status and the price schedule needs
+`-H "Authorization: Token $TOKEN"` (or a session); the examples assume a **field agent** at
+Nyaruguru, the role that registers farmers, plots and deliveries. The "Roles" column says who may
+call each endpoint (R read, W write).
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/status/` | Liveness |
-| POST, GET | `/api/farmers/` | Register / list farmers |
-| GET | `/api/farmers/{id}/` | One farmer |
-| POST, GET | `/api/plots/` | Register a plot (async risk check) / list with filters |
-| GET | `/api/plots/{id}/` | One plot |
-| GET | `/api/plots/{id}/risk-checks/` | Registry attempt history for a plot |
-| POST, GET | `/api/deliveries/` | Record a delivery (idempotent) / delivery feed |
-| GET | `/api/deliveries/{id}/` | One delivery |
-| GET | `/api/stations/`, `/api/stations/{id}/` | Washing stations |
-| GET | `/api/stations/{id}/deliveries/` | One station's delivery feed |
-| GET | `/api/price-schedule/` | Active season's per-grade prices |
-| GET | `/api/schema/`, `/api/docs/` | OpenAPI schema, Swagger UI |
+| Method | Path | Purpose | Roles |
+|---|---|---|---|
+| GET | `/api/status/` | Liveness | public |
+| POST | `/api/auth/staff-login/`, `/api/auth/api-token/` | Log in (session / token) | public |
+| POST, GET | `/api/farmers/` | Register / list farmers | agent RW; exporter, auditor R |
+| GET | `/api/farmers/{id}/` | One farmer | all three roles R |
+| POST, GET | `/api/plots/` | Register a plot (async risk check) / list with filters | agent RW; exporter, auditor R |
+| GET | `/api/plots/{id}/` | One plot | all three roles R |
+| GET | `/api/plots/{id}/risk-checks/` | Registry attempt history for a plot | all three roles R |
+| POST, GET | `/api/deliveries/` | Record a delivery (idempotent) / delivery feed | agent RW; exporter, auditor R |
+| GET | `/api/deliveries/{id}/` | One delivery | all three roles R |
+| GET | `/api/stations/`, `/api/stations/{id}/` | Washing stations | all three roles R |
+| GET | `/api/stations/{id}/deliveries/` | One station's delivery feed | all three roles R |
+| GET | `/api/audit-log/` | Access audit trail | auditor R |
+| GET | `/api/price-schedule/` | Active season's per-grade prices | public |
+| GET | `/api/schema/`, `/api/docs/` | OpenAPI schema, Swagger UI | public |
+
+A field agent sees only their own station's records; see the [role table](#authentication-and-roles-f2).
 
 ### Status
 
@@ -223,26 +366,31 @@ health: if the worker or beat dies, `stale` grows (plots with no attempt in
 ### Register a farmer
 
 Phones are accepted as `+2507XXXXXXXX`, `2507XXXXXXXX` or `07XXXXXXXX` (MTN/Airtel) and stored in
-E.164. `national_id` is optional but, when present, must be 16 digits and unique.
+E.164. `national_id` is optional but, when present, must be 16 digits and unique. It is stored in
+full but read back masked to its last 4 digits (and not at all for exporters and auditors). A
+farmer registered by a field agent gets the agent's station as `home_station`.
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/api/farmers/ -H 'Content-Type: application/json' -d '{
-  "full_name": "Uwimana Béatrice", "member_number": "KWA-F-0417", "cooperative": "Huye",
-  "national_id": "1198770123456789", "phone": "+250780000000"}'
+curl -s -X POST http://127.0.0.1:8000/api/farmers/ -H "Authorization: Token $TOKEN" \
+  -H 'Content-Type: application/json' -d '{
+  "full_name": "Mukamana Claudine", "member_number": "KWA-F-0418", "cooperative": "Huye",
+  "national_id": "1198870123450001", "phone": "+250780000001"}'
 ```
 ```json
-{"id": 4, "full_name": "Uwimana Béatrice", "member_number": "KWA-F-0417", "cooperative": "Huye",
- "phone": "+250780000000", "national_id": "1198770123456789", "home_station": null,
+{"id": 4, "full_name": "Mukamana Claudine", "member_number": "KWA-F-0418", "cooperative": "Huye",
+ "phone": "+250780000001", "national_id": "************0001", "home_station": "Nyaruguru",
  "created_at": "2026-09-29T20:30:22.817202+02:00"}
 ```
 
 ### Register a plot (returns immediately, check runs in background)
 
-`sector` and `washing_station` are given by name. Coordinates must fall inside Rwanda, and the area
-must be between 0 and 50 ha.
+`sector` and `washing_station` are given by name. Coordinates must fall inside Rwanda's bounding
+box, and the area must be between 0 and 50 ha. A field agent can register plots only at their own
+station, for farmers they can see.
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/api/plots/ -H 'Content-Type: application/json' -d '{
+curl -s -X POST http://127.0.0.1:8000/api/plots/ -H "Authorization: Token $TOKEN" \
+  -H 'Content-Type: application/json' -d '{
   "farmer": 4, "plot_code": "KWA-P-0417-A", "sector": "Kigoma", "washing_station": "Nyaruguru",
   "latitude": "-2.540000", "longitude": "29.710000", "area_hectares": "0.42"}'
 ```
@@ -250,7 +398,8 @@ curl -s -X POST http://127.0.0.1:8000/api/plots/ -H 'Content-Type: application/j
 {"id": 6, "farmer": 4, "plot_code": "KWA-P-0417-A", "label": "", "sector": "Kigoma",
  "washing_station": "Nyaruguru", "latitude": "-2.540000", "longitude": "29.710000",
  "area_hectares": "0.4200", "risk_status": "pending", "risk_checked_at": null,
- "requires_manual_review": false, "created_at": "2026-09-29T20:31:35.170000+02:00"}
+ "requires_manual_review": false, "coordinate_precision": "full",
+ "created_at": "2026-09-29T20:31:35.170000+02:00"}
 ```
 
 ### List plots (filters: `farmer`, `sector`, `washing_station`, `risk_status`, `requires_manual_review`)
@@ -259,7 +408,7 @@ curl -s -X POST http://127.0.0.1:8000/api/plots/ -H 'Content-Type: application/j
 `unverified` after `RISK_CHECK_MANUAL_REVIEW_DAYS`.
 
 ```bash
-curl -s 'http://127.0.0.1:8000/api/plots/?risk_status=pending&page_size=1'
+curl -s 'http://127.0.0.1:8000/api/plots/?risk_status=pending&page_size=1' -H "Authorization: Token $TOKEN"
 ```
 ```json
 {"next": "http://127.0.0.1:8000/api/plots/?cursor=cD0yMDI2LTA5LTI5KzE4JTNBMzMlM0ExMS42Nzg0OTIlMkIwMCUzQTAw&page_size=1&risk_status=pending",
@@ -271,7 +420,7 @@ curl -s 'http://127.0.0.1:8000/api/plots/?risk_status=pending&page_size=1'
 ### Risk-check history
 
 ```bash
-curl -s http://127.0.0.1:8000/api/plots/11/risk-checks/
+curl -s http://127.0.0.1:8000/api/plots/11/risk-checks/ -H "Authorization: Token $TOKEN"
 ```
 ```json
 [{"attempt_number": 1, "outcome": "error", "started_at": "2026-09-29T20:33:12.72+02:00",
@@ -287,7 +436,8 @@ future. The price comes from the active schedule **at recording time** and is sn
 `client_reference` is the phone's idempotency key (optional, unique per station).
 
 ```bash
-curl -s -i -X POST http://127.0.0.1:8000/api/deliveries/ -H 'Content-Type: application/json' -d '{
+curl -s -i -X POST http://127.0.0.1:8000/api/deliveries/ -H "Authorization: Token $TOKEN" \
+  -H 'Content-Type: application/json' -d '{
   "plot": 1, "washing_station": "Nyaruguru", "weight_kg": "35.5", "grade": "A",
   "client_reference": "nyr-phone-02-0040"}'
 ```
@@ -329,27 +479,29 @@ HTTP/1.1 409 Conflict
 Every error uses one envelope: `{"error": {"code", "message", "details"}}`.
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/api/deliveries/ -H 'Content-Type: application/json' \
+curl -s -X POST http://127.0.0.1:8000/api/deliveries/ -H "Authorization: Token $TOKEN" \
+  -H 'Content-Type: application/json' \
   -d '{"plot": 1, "washing_station": "Kamonyi", "weight_kg": "-3", "grade": "A", "delivered_on": "2030-01-01"}'
 ```
 ```json
 {"error": {"code": "validation_error", "message": "The request data is invalid.",
-  "details": {"weight_kg": ["Must be greater than 0."],
+  "details": {"washing_station": ["Object with name=Kamonyi does not exist."],
+              "weight_kg": ["Must be greater than 0."],
               "delivered_on": ["Delivery date cannot be in the future."]}}}
 ```
 
-Once the field errors are fixed, cross-field rules run:
-
-```json
-{"error": {"code": "validation_error", "message": "The request data is invalid.",
-  "details": {"washing_station": ["Plot KWA-P-DEMO-01 delivers to Nyaruguru, not Kamonyi."]}}}
-```
+For a field agent at Nyaruguru, Kamonyi is outside their scope, so it fails as "does not exist",
+the same as a name that really does not exist. The cross-field rule that a delivery's station must be its plot's station
+(`"Plot KWA-P-DEMO-01 delivers to Nyaruguru, not Kamonyi."`) still runs, as a second line of
+defence.
 
 | Status | `code` | When |
 |---|---|---|
 | 400 | `validation_error` | Field or cross-field rule failed (`details` maps field → messages) |
 | 400 | `parse_error` | Malformed JSON |
-| 404 | `not_found` | Unknown id or route, e.g. `{"error": {"code": "not_found", "message": "No Farmer matches the given query.", "details": {}}}` |
+| 401 | `not_authenticated` / `authentication_failed` | No credentials, or an invalid token (header `WWW-Authenticate: Token`) |
+| 403 | `permission_denied` | Logged in, but the role may not do this (or the user has no role); also a session write without a CSRF token |
+| 404 | `not_found` | Unknown id or route, **or a record outside a field agent's station** (never `403`, so its existence is not confirmed), e.g. `{"error": {"code": "not_found", "message": "No Farmer matches the given query.", "details": {}}}` |
 | 405 | `method_not_allowed` | e.g. `DELETE /api/price-schedule/` |
 | 409 | `conflict` | A natural key (`member_number`, `plot_code`, or a station's `client_reference`) was reused with different details (`details.mismatched_fields`), or two requests raced past validation into a DB uniqueness constraint |
 | 500 | `server_error` | Unexpected failure. The traceback is logged, never returned. |
@@ -375,7 +527,7 @@ first. Filters: `washing_station` (name, on `/api/deliveries/`), `grade`, `risk_
 to change the page length (default 20, maximum 100).
 
 ```bash
-curl -s 'http://127.0.0.1:8000/api/stations/1/deliveries/?page_size=2'
+curl -s 'http://127.0.0.1:8000/api/stations/1/deliveries/?page_size=2' -H "Authorization: Token $TOKEN"
 ```
 ```json
 {
@@ -456,8 +608,10 @@ read from the database when each delivery is recorded.
   `SEARCH registry_plot USING INDEX plot_list_cursor_idx (created_at<?)`, and
   `test_list_endpoints_page_through_an_index` guards both.
 - **No N+1.** `select_related("plot__farmer", "washing_station")` makes each page **one SQL query**
-  (two for the station route, including the station lookup that returns 404). Tests assert this
-  with `django_assert_num_queries`.
+  (two for the station route, including the station lookup that returns 404), plus, since F2, the
+  one `INSERT` into the audit log. Tests assert this with `django_assert_num_queries` and check
+  that the extra query is the audit insert. Station scoping is a `WHERE` on the same indexed
+  column, so it adds no query.
 - **No `COUNT(*)`.** Cursor pagination does not count the table, unlike page-number pagination.
 - **Small payloads for 2G.** The feed serializer is flat (no nested plot or farmer objects).
   **Measured:** one page of 20 deliveries is **6,316 bytes** (about 315 bytes per row). With
@@ -484,8 +638,9 @@ Other decisions worth knowing:
 - **Snapshots:** `unit_price_rwf`, `amount_due_rwf` and `plot_risk_status_at_delivery` are copied
   onto the delivery, so later price changes or risk verdicts never rewrite history.
   `is_exportable` is computed from the plot's *current* status.
-- **Sectors and stations are models**, referenced by name in the API. Formative 2 scopes access by
-  washing station and coarsens coordinates by sector.
+- **Sectors and stations are models**, referenced by name in the API. F2 scopes field agents by
+  washing station and serves exporters each sector's reference point (`Sector.centroid_latitude`,
+  `centroid_longitude`) instead of plot coordinates.
 - **DB constraints back up validation:** Rwanda bounding box and area range on plots, the weight
   range on deliveries, one active price schedule per season, one price per grade per schedule, and
   `client_reference` unique per station.
@@ -494,9 +649,9 @@ Other decisions worth knowing:
   original, otherwise the response is `409`. All three resources share one implementation, `NaturalKeyReplayMixin` in
   `apps/core/idempotency.py`, so the 409 body is identical everywhere. A race between two identical requests is caught by the
   unique constraint and also returns the original.
-- **Personal data (known F1 limitation):** `national_id` and `phone` are returned in full because
-  F1 has no authentication yet. Formative 2 adds roles, masks national IDs to their last four
-  digits for field agents, and hides them from exporters and auditors (see `F2_CONTRACT.md`).
+- **Personal data:** since F2, `national_id` is returned only to field agents, masked to its last
+  four digits, and is absent for exporters and auditors. **Known limitation:** `phone` and farmer
+  names are still visible to all three roles; masking phones is deferred (see DECISION_LOG.md).
 
 ## Development history
 
@@ -508,11 +663,63 @@ The F1 history has one unusual stretch, recorded here so it reads clearly:
 | `5e1c6eb` | The implementation was removed, with the intent of rewriting it independently. |
 | `132c56e` | The rewrite was not completed, so the implementation was restored in one commit, together with the changes from a Claude-assisted review: one shared idempotency mixin for all creates (ADR-003), indexes for the farmer and plot list cursors with `EXPLAIN` tests, and the risk-check backlog on `/api/status/`. |
 
-From F2 onward, each change goes on its own branch, is merged through a pull request with CI
-green, and is tagged at each milestone.
+**F1 feedback:** the Classroom 50 Feedback pull request (#1) had no teacher comments or reviews
+when F2 started, and F1 autograding scored 100/100 (`aa58d56`), so there were no review points to
+address.
+
+**F2** was built in nine steps, one commit each, committed directly to `main` (not through
+branches and pull requests, as an earlier version of this README planned). Before each commit,
+`make check` (lint, format, types, Django check, migration check, tests, schema freshness) passed
+locally:
+
+| Commit | Step |
+|---|---|
+| `ec43c22` | Widen the southern latitude bound to -2.95 so fixture plot M2 is accepted |
+| `ec1bc61` | `UserProfile` (role + station) and the central deny-by-default `ROLE_POLICIES` |
+| `6469e72` | Session + token authentication, the two login endpoints, `IsAuthenticated` by default |
+| `b2f684b` | `seed_rbac_fixtures` |
+| `acc05db` | Enforce the policies: permission class and `visible_to()` station scoping |
+| `f9522a7` | Sector reference points for exporter coarsening |
+| `555ea41` | Field rules: national-ID masking, coordinate coarsening, commercial terms |
+| `0a2fe7b` | Append-only `AuditLog` and `/api/audit-log/` |
+| *(this commit)* | Documentation (`docs/RBAC_MATRIX.md`, DECISION_LOG.md completion, README), audit-log precision filters, and a test that every serializer applies the field rules |
 
 ## AI-use disclosure
-Used for: Reviewing the F1 submission against the rubric, identifying potential improvements, debugging assistance, and documentation formatting. Claude also provided suggestions for the follow-up implementation and testing work.
-My role: I reviewed, implemented, and explained the changes myself, including the idempotency handling, database indexes, risk-check status endpoint, tests, README updates, and ADR reasoning.
-Verification: I verified the changes with the full pytest suite, ruff check, mypy, manage.py makemigrations --check, and a regenerated and validated schema.yml. The database index claims were also confirmed with EXPLAIN on a migrated database.
-Disclosure: The commits that received Claude assistance include a Co-Authored-By: Claude trailer.
+
+### F1
+
+Used for: Reviewing the F1 submission against the rubric, identifying potential improvements, debugging assistance, and documentation formatting. Claude also provided suggestions for the follow-up implementation and testing work.
+My role: I reviewed, implemented, and explained the changes myself, including the idempotency handling, database indexes, risk-check status endpoint, tests, README updates, and ADR reasoning.
+Verification: I verified the changes with the full pytest suite, ruff check, mypy, manage.py makemigrations --check, and a regenerated and validated schema.yml. The database index claims were also confirmed with EXPLAIN on a migrated database.
+Disclosure: The F1 commits that received Claude assistance include a Co-Authored-By: Claude trailer, except `132c56e`, whose commit message names the Claude-assisted review instead.
+
+
+### F2 AI-Use Annex
+
+**Tool:** Claude Code (Anthropic's Claude, Opus model), working in this repository.
+
+**What Claude did:**
+
+- Analysed the F1 codebase against the F2 contract and identified implementation questions, including the fixture plot M2 latitude issue, the seed farmer's national-ID collision with the F1 flow, anonymous F1 tests, and treatment of the price schedule.
+- Assisted with implementation of the nine F2 steps, including code, migrations, tests, and documentation updates.
+- Provided debugging assistance and helped identify implementation issues during development.
+- Assisted with formatting and documenting the F2 README sections.
+
+**My role and decisions:**
+
+- I made the final design and trade-off decisions for F2 and authored and reviewed the Decision Log.
+- I decided to widen the latitude bound through a migration, identify the seed farmer using national ID and member number, keep the price schedule public, make exporters and auditors read-only, and scope field-agent farmer visibility through plots.
+- When Claude identified that newly registered farmers could be invisible to their own field agent, I decided to add the home station to the visibility rule.
+- I reviewed, implemented, and verified the resulting changes rather than treating Claude's suggestions as automatically correct.
+
+**My verification:**
+
+- I ran `make check` myself before every commit.
+- I ran `migrate` and `seed_rbac_fixtures` twice locally to verify that the seed command is idempotent.
+- I asked for internal implementation notes to be removed from the published OpenAPI schema and reviewed the resulting documentation.
+- I made every commit and push myself; Claude made no commits or pushes.
+
+**Disclosure:**
+
+All F2 commits were produced with Claude's assistance. The eight commits `ec43c22` to `0a2fe7b` do not carry a `Co-Authored-By` trailer, unlike the F1 commits. Their messages were drafted without one. This was an oversight, not an attempt to conceal AI assistance. The subsequent documentation commit carries the trailer.
+

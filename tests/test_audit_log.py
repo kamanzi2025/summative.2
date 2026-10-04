@@ -224,3 +224,29 @@ def test_audit_log_filters_by_user_and_status():
     assert rows and {row["username"] for row in rows} == {EXPORTER}
     rows = client.get("/api/audit-log/", {"status_code": 403}).json()["results"]
     assert rows and {row["status_code"] for row in rows} == {403}
+
+
+def test_solanges_questions_are_one_query_each():
+    """The three questions in the F2 brief, answered from the audit log by URL."""
+    client_for(AGENT).get("/api/plots/")
+    client_for(AGENT).get("/api/farmers/")
+    client_for(EXPORTER).get("/api/plots/")
+    client_for(AUDITOR).get("/api/plots/")
+    client = client_for(AUDITOR)
+
+    def who(query):
+        rows = client.get(f"/api/audit-log/?{query}").json()["results"]
+        return {(row["username"], row["resource"]) for row in rows}
+
+    # 1. Who has looked at exact plot coordinates?
+    assert who("resource=plots&coordinate_precision=full") == {(AGENT, "plots"), (AUDITOR, "plots")}
+    # 2. Who has looked at farmer identity data (the national ID) this season?
+    assert who("resource=farmers&national_id=last_four&occurred_after=2026-01-01T00:00:00Z") == {(AGENT, "farmers")}
+    # 3. What precision left the system for the buyer?
+    rows = client.get("/api/audit-log/?role=exporter_partner&resource=plots").json()["results"]
+    assert {row["coordinate_precision"] for row in rows} == {"sector"}
+
+
+def test_precision_filters_reject_unknown_values():
+    response = client_for(AUDITOR).get("/api/audit-log/?coordinate_precision=exact")
+    assert response.status_code == 400

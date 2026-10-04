@@ -17,7 +17,8 @@ MAX_PLOT_AREA_HECTARES = Decimal("50")
 
 
 class Sector(models.Model):
-    """Administrative sector. Formative 2 scopes access and coarsens coordinates by sector."""
+    """Administrative sector. Exporter partners receive a plot's sector reference point instead of
+    the plot's own coordinates, so location precision is keyed to the sector."""
 
     name = models.CharField(max_length=80, unique=True)
     district = models.CharField(max_length=80)

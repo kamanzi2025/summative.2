@@ -5,10 +5,12 @@ with a Django session as the hidden checks are.
 """
 
 import re
+from importlib import import_module
 from io import StringIO
 from urllib.parse import urlsplit
 
 import pytest
+from django.apps import apps as django_apps
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from drf_spectacular.generators import SchemaGenerator
@@ -18,6 +20,8 @@ from rest_framework.test import APIClient, APIRequestFactory
 # pytest puts tests/ on sys.path (rootdir-relative "prepend" import mode).
 from test_sector_centroids import roundings
 
+from apps.accounts.field_rules import CommercialTermField, CoordinateField, NationalIdField, PolicyFieldsMixin
+from apps.deliveries.models import Delivery
 from apps.registry.models import Farmer, Plot, Sector, WashingStation
 from apps.registry.serializers import FarmerSerializer, PlotSerializer
 
@@ -228,3 +232,98 @@ def test_published_schema_still_documents_every_field():
     assert {"latitude", "longitude", "coordinate_precision"} <= set(schemas["Plot"]["properties"])
     assert {"unit_price_rwf", "amount_due_rwf"} <= set(schemas["Delivery"]["properties"])
     assert "amount_due_rwf" in schemas["DeliveryFeed"]["properties"]
+
+
+# --- Guard: a new serializer cannot expose a protected field without its rule ------------------
+
+PROTECTED_FIELD_CLASS = {
+    "national_id": NationalIdField,
+    "latitude": CoordinateField,
+    "longitude": CoordinateField,
+    "unit_price_rwf": CommercialTermField,
+    "amount_due_rwf": CommercialTermField,
+}
+
+
+PROTECTED_MODELS = {
+    "national_id": (Farmer,),
+    "latitude": (Plot,),
+    "longitude": (Plot,),
+    "unit_price_rwf": (Delivery,),
+    "amount_due_rwf": (Delivery,),
+}
+
+
+def project_serializers():
+    """Every serializer class defined under apps/ (importing each app's serializers module)."""
+    for config in django_apps.get_app_configs():
+        if config.name.startswith("apps."):
+            try:
+                import_module(f"{config.name}.serializers")
+            except ModuleNotFoundError:
+                pass
+    found, stack = set(), [serializers.Serializer]
+    while stack:
+        for sub in stack.pop().__subclasses__():
+            stack.append(sub)
+            if sub.__module__.startswith("apps."):
+                found.add(sub)
+    return found
+
+
+def exposed_protected_fields(cls):
+    """(name, field object or None) for each protected value the serializer would output.
+    None means ModelSerializer would auto-generate a plain field for it."""
+    declared = cls._declared_fields
+    for name, field in declared.items():
+        source = (field.source or name).split(".")[-1]
+        if source in PROTECTED_FIELD_CLASS:
+            yield source, field
+    meta = getattr(cls, "Meta", None)
+    model = getattr(meta, "model", None)
+    if model is None:
+        return
+    names = getattr(meta, "fields", [])
+    if names == serializers.ALL_FIELDS:
+        names = [f.name for f in model._meta.get_fields()]
+    for name in names:
+        # Model-aware: AuditLog.national_id records *how* IDs were served, not an ID.
+        if name not in declared and model in PROTECTED_MODELS.get(name, ()):
+            yield name, None
+
+
+def test_the_guard_finds_the_project_serializers():
+    names = {cls.__name__ for cls in project_serializers()}
+    assert {"FarmerSerializer", "PlotSerializer", "DeliverySerializer", "DeliveryFeedSerializer"} <= names
+
+
+def test_every_serializer_exposing_a_protected_field_applies_the_policy():
+    """Adding an endpoint that returns farmer, plot or delivery data needs no masking code of its
+    own, but it must reuse the field classes and PolicyFieldsMixin. This fails if it does not."""
+    problems = []
+    for cls in project_serializers():
+        for name, field in exposed_protected_fields(cls):
+            expected = PROTECTED_FIELD_CLASS[name]
+            if not isinstance(field, expected):
+                problems.append(f"{cls.__name__}.{name} must be declared as {expected.__name__}")
+            elif not issubclass(cls, PolicyFieldsMixin):
+                problems.append(f"{cls.__name__} exposes {name} but does not use PolicyFieldsMixin")
+    assert problems == []
+
+
+def test_the_guard_catches_an_unprotected_serializer():
+    class Leaky(serializers.ModelSerializer):
+        class Meta:
+            model = Farmer
+            fields = ["id", "national_id"]
+
+    class Forgetful(serializers.ModelSerializer):
+        national_id = NationalIdField()
+
+        class Meta:
+            model = Farmer
+            fields = ["id", "national_id"]
+
+    assert list(exposed_protected_fields(Leaky)) == [("national_id", None)]
+    field = dict(exposed_protected_fields(Forgetful))["national_id"]
+    assert isinstance(field, NationalIdField) and not issubclass(Forgetful, PolicyFieldsMixin)

@@ -13,12 +13,32 @@ paths:
         Who accessed farmer, plot and delivery data, newest first. Compliance auditors only.
         Reading this list is itself recorded.
       parameters:
+      - in: query
+        name: coordinate_precision
+        schema:
+          type: string
+          enum:
+          - full
+          - sector
+        description: |-
+          * `full` - full
+          * `sector` - sector
       - name: cursor
         required: false
         in: query
         description: The pagination cursor value.
         schema:
           type: string
+      - in: query
+        name: national_id
+        schema:
+          type: string
+          enum:
+          - hidden
+          - last_four
+        description: |-
+          * `last_four` - last_four
+          * `hidden` - hidden
       - in: query
         name: occurred_after
         schema:
