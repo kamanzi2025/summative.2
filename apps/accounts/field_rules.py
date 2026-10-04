@@ -91,8 +91,10 @@ class CommercialTermField(serializers.DecimalField):
         return not policy.commercial_terms
 
 
-# Removes every field whose `hidden_for(policy)` is true for the requesting user. A comment, not a
-# docstring, so serializers without their own docstring do not publish it in schema.yml.
+# Keeps every field whose `hidden_for(policy)` is true out of the response. A hidden field that can
+# be written (the national ID on registration) stays accepted as input, write-only, so a role that
+# may not see it can still record it; a hidden read-only field (prices) is removed. A comment, not
+# a docstring, so serializers without their own docstring do not publish it in schema.yml.
 class PolicyFieldsMixin:
     def get_fields(self) -> dict[str, Any]:
         fields: dict[str, Any] = super().get_fields()  # type: ignore[misc]
@@ -100,8 +102,12 @@ class PolicyFieldsMixin:
         if is_schema_generation(context):
             return fields
         policy = policy_from_context(context)
-        return {
-            name: field
-            for name, field in fields.items()
-            if not (hasattr(field, "hidden_for") and field.hidden_for(policy))
-        }
+        visible = {}
+        for name, field in fields.items():
+            if not (hasattr(field, "hidden_for") and field.hidden_for(policy)):
+                visible[name] = field
+            elif not field.read_only:
+                # get_fields() returns fresh copies per serializer, so this does not leak.
+                field.write_only = True
+                visible[name] = field
+        return visible

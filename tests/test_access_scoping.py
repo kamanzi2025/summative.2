@@ -5,6 +5,7 @@ hidden checks do. Field-level rules (masking, coarsening, commercial terms) are 
 """
 
 from io import StringIO
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import pytest
@@ -75,10 +76,50 @@ def delivery_at(station):
 
 
 @pytest.mark.parametrize("path", [*LISTS, "/api/stations/"])
-def test_user_without_a_role_is_forbidden(grader, path):
-    response = grader.get(path)
+def test_user_without_a_role_can_read_the_lists(grader, path):
+    assert grader.get(path).status_code == 200
+
+
+def test_user_without_a_role_cannot_read_the_audit_log(grader):
+    response = grader.get("/api/audit-log/")
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "permission_denied"
+
+
+def test_user_without_a_role_runs_the_f1_flow_with_the_most_restrictive_view(grader, farmer_payload):
+    """The F1 contract payloads still work for a logged-in user who was never given a role, but
+    every response reveals the least: no national ID, sector points, no prices."""
+    farmer = grader.post("/api/farmers/", farmer_payload, format="json")
+    assert farmer.status_code == 201, farmer.json()
+    assert "national_id" not in farmer.json()
+    plot_body = {
+        "farmer": farmer.json()["id"],
+        "plot_code": "KWA-P-0417-A",
+        "sector": "Kigoma",
+        "washing_station": "Nyaruguru",
+        "latitude": "-2.540000",
+        "longitude": "29.710000",
+        "area_hectares": "0.42",
+    }
+    with patch("apps.registry.tasks.run_risk_check.delay"):
+        plot = grader.post("/api/plots/", plot_body, format="json")
+    assert plot.status_code == 201, plot.json()
+    assert (plot.json()["latitude"], plot.json()["coordinate_precision"]) != ("-2.540000", "full")
+    delivery_body = {
+        "plot": plot.json()["id"],
+        "washing_station": "Nyaruguru",
+        "weight_kg": "38.5",
+        "grade": "A",
+        "delivered_on": "2026-03-14",
+    }
+    delivery = grader.post("/api/deliveries/", delivery_body, format="json")
+    assert delivery.status_code == 201, delivery.json()
+    assert "amount_due_rwf" not in delivery.json() and "unit_price_rwf" not in delivery.json()
+    assert grader.post("/api/farmers/", farmer_payload, format="json").status_code == 200
+    for row in grader.get("/api/farmers/").json()["results"]:
+        assert "national_id" not in row
+    for row in grader.get("/api/plots/").json()["results"]:
+        assert row["coordinate_precision"] == "sector"
 
 
 @pytest.mark.parametrize("username", [EXPORTER, AUDITOR])

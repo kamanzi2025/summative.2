@@ -327,3 +327,12 @@ def test_the_guard_catches_an_unprotected_serializer():
     assert list(exposed_protected_fields(Leaky)) == [("national_id", None)]
     field = dict(exposed_protected_fields(Forgetful))["national_id"]
     assert isinstance(field, NationalIdField) and not issubclass(Forgetful, PolicyFieldsMixin)
+
+
+def test_a_role_that_cannot_see_the_national_id_can_still_record_it(make_staff_user, farmer_payload):
+    """Hidden on output, accepted on input: registering a farmer must never drop the ID."""
+    make_staff_user(None, username="no_role_user")
+    client = client_for("no_role_user")
+    response = client.post("/api/farmers/", farmer_payload, format="json")
+    assert response.status_code == 201 and "national_id" not in response.json()
+    assert Farmer.objects.get(pk=response.json()["id"]).national_id == farmer_payload["national_id"]

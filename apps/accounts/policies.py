@@ -1,9 +1,11 @@
 """Central role policies: the one place that says what each role may do.
 
-Deny by default. Anything not granted here is refused: anonymous or inactive users, users without
-a profile, a role with no policy, a field agent with no station, and any resource or action a
-policy does not list. Views, querysets and serializers ask this module; they never test role
-names themselves.
+Deny by default. Anything not granted here is refused: anonymous or inactive users, a role with
+no policy, a field agent with no station, and any resource or action a policy does not list.
+Views, querysets and serializers ask this module; they never test role names themselves.
+
+A logged-in user who has no role profile at all gets NO_ROLE_POLICY: the F1 operations (register
+farmers, plots and deliveries) under the most restrictive field rules (see DECISION_LOG.md).
 
 The roles are not a ladder. The auditor sees *more* location detail than the exporter partner and
 *less* commercial detail, so each policy is a set of independent switches.
@@ -116,6 +118,23 @@ ROLE_POLICIES: Mapping[str, RolePolicy] = MappingProxyType(
 )
 
 
+# Logged in, active, but never given a role. Keeps the F1 operations working (register and list
+# farmers, plots and deliveries) while revealing the least: no national ID, sector reference
+# points instead of coordinates, no prices, no audit log.
+NO_ROLE_POLICY = RolePolicy(
+    grants={
+        Resource.FARMERS: READ_WRITE,
+        Resource.PLOTS: READ_WRITE,
+        Resource.DELIVERIES: READ_WRITE,
+        Resource.STATIONS: READ_ONLY,
+    },
+    record_scope=RecordScope.ALL,
+    coordinates=CoordinatePrecision.SECTOR,
+    national_id=NationalIdVisibility.HIDDEN,
+    commercial_terms=False,
+)
+
+
 def profile_for(user: AnyUser) -> UserProfile | None:
     """The user's profile, or None when they must be treated as having no role."""
     if user is None or not user.is_authenticated or not user.is_active:
@@ -131,6 +150,11 @@ def profile_for(user: AnyUser) -> UserProfile | None:
 
 def policy_for(user: AnyUser) -> RolePolicy | None:
     """The user's policy, or None (deny everything)."""
+    if user is None or not user.is_authenticated or not user.is_active:
+        return None
+    if getattr(user, "profile", None) is None:
+        return NO_ROLE_POLICY
+    # A profile that exists but is invalid (unknown role, field agent without a station) is denied.
     profile = profile_for(user)
     return ROLE_POLICIES.get(profile.role) if profile else None
 

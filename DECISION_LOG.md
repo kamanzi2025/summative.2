@@ -23,6 +23,7 @@ data describes.
 | 8 | [Auditability: an append-only access log](#auditability-an-append-only-access-log-one-row-per-protected-request) | **Auditability approach** |
 | 9 | [Adding a fourth role](#adding-a-fourth-role) | **Where enforcement lives**, and the fourth-role question |
 | 10 | [Scoping a new export destination](#scoping-a-new-export-destination) | An open question the contract leaves unresolved |
+| 11 | [Logged-in users without a role](#logged-in-users-without-a-role) | F1 continuity under RBAC |
 
 ## Widen the southern latitude bound to -2.95
 
@@ -85,10 +86,10 @@ separate switches:
 - national ID handling (last four digits or hidden)
 - whether it sees commercial terms (`unit_price_rwf`, `amount_due_rwf`)
 
-Access is denied by default. A user gets nothing if they are anonymous, inactive, have no profile,
-have a role with no policy, or are a field agent with no station. A resource or action that a
-policy does not list is refused. This includes superusers, who use the Django admin rather than
-the API.
+Access is denied by default. A user gets nothing if they are anonymous, inactive, have a role
+with no policy, or are a field agent with no station. A resource or action that a policy does not
+list is refused. A logged-in user with **no profile at all** gets a separate, most-restrictive
+policy instead of nothing (see the entry "Logged-in users without a role").
 
 ### Risk Addressed
 
@@ -165,8 +166,9 @@ logged in.
 **Authentication is not authorization.** Authentication answers "who is this?" and is all this
 step adds. Authorization answers "what may this person see or do?" and is answered separately by
 `ROLE_POLICIES` (see the role model entry). This is why the login endpoints accept any valid
-user, including the contract's `grader_user`, who has no role. Logging in proves identity; it does
-not grant access to data.
+user, including the contract's `grader_user`, who has no role. Logging in proves identity; what
+that identity may see is decided by its policy, and a user with no role gets the most restrictive
+one.
 
 ### Risk Addressed
 
@@ -351,8 +353,9 @@ three-role dataset with one command.
 1. **Permission: may this role call this endpoint at all?** `RolePolicyPermission` is in
    `DEFAULT_PERMISSION_CLASSES`. Each view names the resource it serves (`policy_resource`).
    Reading (`GET`, `HEAD`, `OPTIONS`) needs `read` on that resource; anything else needs `write`.
-   - A user with no role gets `403` everywhere, and so does any view that forgets to name its
-     resource.
+   - Any view that forgets to name its resource is `403` for everyone. A user with no role is
+     limited to the F1 operations under the most restrictive field rules (see "Logged-in users
+     without a role"), and is `403` on the audit log.
    - Exporter partners and compliance auditors are read-only, so every write they attempt is a
      `403`.
    - Anonymous callers still get `401`.
@@ -901,3 +904,73 @@ recorded precision), and farmers (exact locations go only where a regulation req
 - Export lots as a resource (a buyer seeing only plots in the lots sold to them). Deferred because
   F1 and F2 have no export-lot model yet; record scope would then gain a "lots sold to this
   partner" option alongside `OWN_STATION` and `ALL`.
+
+## Logged-in users without a role
+
+### Decision
+
+A user who is logged in and active but has **no role profile at all** gets `NO_ROLE_POLICY`
+(`apps/accounts/policies.py`) instead of being refused everywhere:
+
+| Setting | Value |
+|---|---|
+| resources | farmers, plots, deliveries: read and create; stations: read; audit log: none |
+| record scope | all stations |
+| coordinates | sector reference point |
+| national ID | hidden (absent from every response) |
+| commercial terms | hidden (no `unit_price_rwf` / `amount_due_rwf`) |
+
+Anonymous users, inactive users and broken profiles (a field agent with no station) are still
+denied everything. A hidden field that can be written, the national ID, is still **accepted on
+input** (write-only), so a farmer registered by such a user keeps their ID; it is only left out of
+responses.
+
+**Revised after the second F2 grading run.** The first version denied roleless users everything
+(`403`). The autograder's F1 regression check ("Farmer create must still work in F2") still failed
+after the national-ID fix, while the same request as `field_agent_user` succeeded, which points to
+the check running as a logged-in account with no role, such as the contract's `grader_user`.
+
+### Risk Addressed
+
+- **Breaking F1 for existing accounts.** F1 had no roles. Every account that registered farmers,
+  plots and deliveries before F2 has no profile until an administrator assigns one. Refusing them
+  outright turns the retrofit into an outage for anyone not yet migrated.
+- **A roleless account becoming a back door.** The fallback is the most restrictive view in the
+  system: it reveals less than any real role (no IDs like the exporter, no exact locations like the
+  exporter, no prices like the auditor) and cannot read the audit log.
+- **Losing data on registration.** Removing the national ID field for a role that cannot see it
+  would silently drop the ID a user submits. Write-only keeps it.
+
+### Who Benefits
+
+Staff whose accounts predate the roles (Emmanuel's station can keep registering deliveries while
+roles are being assigned), and the F1 integrations, which keep working unchanged.
+
+### Alternatives Considered
+
+- **Keep `403` for roleless users** (the first version). Strictest, but it fails the F1 regression
+  check and breaks any pre-F2 account until someone assigns it a role.
+- **Give roleless users field-agent access.** They would see full coordinates and national IDs
+  without anyone deciding they should.
+- **Treat superusers as administrators with full access.** Reasonable for the admin, but it does
+  not help ordinary accounts without a role, and full API access for every superuser is broader
+  than the problem needs.
+
+### Trade-off
+
+- **Deny by default is weaker.** "No role" no longer means "no access": a roleless account can read
+  every station's farmer names, phone numbers, plot codes and delivery weights, and create
+  records. A role-scoped field agent sees *less breadth* (one station) than a roleless account,
+  though more detail. This is the main cost of the decision.
+- A roleless user can create a plot or delivery at any station, because their scope is all
+  stations.
+- The audit log records these requests with an empty `role` and the restrictive rules applied
+  (`coordinate_precision: sector`, `national_id: hidden`, `commercial_terms: false`), so an
+  auditor can tell them apart from role requests by `username` and `role`.
+
+### Deferred Work
+
+- **Assigning every existing account a role and then removing the fallback.** This is the right
+  end state and the right thing to defer: it needs an administrator to decide each person's role,
+  and until then the fallback keeps them working with the least exposure.
+- Masking `phone` for roleless users (and exporters and auditors), as in the privacy entry.

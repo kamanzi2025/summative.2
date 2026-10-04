@@ -4,6 +4,7 @@ from django.db import IntegrityError, transaction
 
 from apps.accounts.models import Role, UserProfile
 from apps.accounts.policies import (
+    NO_ROLE_POLICY,
     ROLE_POLICIES,
     Action,
     CoordinatePrecision,
@@ -41,15 +42,26 @@ def test_anonymous_users_are_denied_everything(resource, action):
     assert not can(None, resource, action)
 
 
-def test_authenticated_user_without_profile_is_denied():
-    user = User.objects.create_user(username="no_role", password="x")
+@pytest.mark.parametrize("make_user", [User.objects.create_user, User.objects.create_superuser])
+def test_logged_in_user_without_a_role_gets_the_most_restrictive_f1_policy(make_user):
+    user = make_user(username="no_role", password="x")
+    assert policy_for(user) is NO_ROLE_POLICY
+    # The F1 operations still work...
+    for resource in (Resource.FARMERS, Resource.PLOTS, Resource.DELIVERIES):
+        assert can(user, resource, Action.READ) and can(user, resource, Action.WRITE)
+    # ...but nothing sensitive is revealed, and the audit log stays closed.
+    assert not can(user, Resource.AUDIT_LOG, Action.READ)
+    assert not can(user, Resource.STATIONS, Action.WRITE)
+    assert (NO_ROLE_POLICY.coordinates, NO_ROLE_POLICY.national_id, NO_ROLE_POLICY.commercial_terms) == (
+        CoordinatePrecision.SECTOR,
+        NationalIdVisibility.HIDDEN,
+        False,
+    )
+
+
+def test_inactive_user_without_a_role_is_still_denied():
+    user = User.objects.create_user(username="gone", password="x", is_active=False)
     assert policy_for(user) is None
-    assert not can(user, Resource.PLOTS, Action.READ)
-
-
-def test_superuser_without_profile_gets_no_api_access():
-    admin = User.objects.create_superuser(username="root", password="x")
-    assert policy_for(admin) is None
 
 
 def test_inactive_user_is_denied_even_with_a_role(make_staff):

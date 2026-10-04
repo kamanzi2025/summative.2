@@ -27,24 +27,24 @@ only):
 | `exporter_partner` | all stations | all plots, coordinates replaced by the sector's reference point | field not present | no access (`403`) |
 | `compliance_auditor` | all stations, metadata only: no `unit_price_rwf` or `amount_due_rwf` | all plots, full coordinates | field not present | read (`GET /api/audit-log/`) |
 | unauthenticated | `401` | `401` | n/a | `401` |
-| authenticated, no role | `403` | `403` | n/a | `403` |
+| authenticated, no role | all stations, no commercial terms; may create | all plots, sector reference point; may create | not present | no access (`403`) |
 
 ### Every endpoint, by role
 
 R = read, W = write (create). A blank cell is `403`. For anonymous callers every protected
 endpoint returns `401`.
 
-| Endpoint | `field_agent` | `exporter_partner` | `compliance_auditor` | Scope for `field_agent` |
-|---|---|---|---|---|
-| `/api/farmers/`, `/api/farmers/{id}/` | R W | R | R | farmers with a plot at the agent's station, or whose `home_station` is that station |
-| `/api/plots/`, `/api/plots/{id}/` | R W | R | R | plots whose `washing_station` is the agent's station |
-| `/api/plots/{id}/risk-checks/` | R | R | R | same as the plot |
-| `/api/deliveries/`, `/api/deliveries/{id}/` | R W | R | R | deliveries recorded at the agent's station |
-| `/api/stations/`, `/api/stations/{id}/` | R | R | R | the agent's own station only |
-| `/api/stations/{id}/deliveries/` | R | R | R | the agent's own station only |
-| `/api/audit-log/` | | | R | n/a |
-| `/api/status/`, `/api/price-schedule/` | public | public | public | none (no login needed) |
-| `/api/auth/staff-login/`, `/api/auth/api-token/` | public | public | public | none (any valid user can log in) |
+| Endpoint | `field_agent` | `exporter_partner` | `compliance_auditor` | no role | Scope for `field_agent` |
+|---|---|---|---|---|---|
+| `/api/farmers/`, `/api/farmers/{id}/` | R W | R | R | R W | farmers with a plot at the agent's station, or whose `home_station` is that station |
+| `/api/plots/`, `/api/plots/{id}/` | R W | R | R | R W | plots whose `washing_station` is the agent's station |
+| `/api/plots/{id}/risk-checks/` | R | R | R | R | same as the plot |
+| `/api/deliveries/`, `/api/deliveries/{id}/` | R W | R | R | R W | deliveries recorded at the agent's station |
+| `/api/stations/`, `/api/stations/{id}/` | R | R | R | R | the agent's own station only |
+| `/api/stations/{id}/deliveries/` | R | R | R | R | the agent's own station only |
+| `/api/audit-log/` | | | R | | n/a |
+| `/api/status/`, `/api/price-schedule/` | public | public | public | public | none (no login needed) |
+| `/api/auth/staff-login/`, `/api/auth/api-token/` | public | public | public | public | none (any valid user can log in) |
 
 Exporter partners and compliance auditors see every station. Each field agent sees only their own
 station. A record outside a field agent's scope is `404`, the same as a record that does not
@@ -69,8 +69,10 @@ A role is a **profile row**, not a field on Django's `User` and not a group:
   to their `washing_station`.
 - Database constraints keep the data valid: the role must be one of the three, a field agent
   must have a station, and the other two roles must not have one.
-- A user with **no profile has no role** and is refused on every protected endpoint. That
-  includes superusers, who use the Django admin rather than the API.
+- A logged-in user with **no profile** gets `NO_ROLE_POLICY`: the F1 operations (read and create
+  farmers, plots, deliveries) under the most restrictive field rules (no national ID, sector
+  reference points, no prices) and no audit log. Anonymous users, inactive users and invalid
+  profiles are refused everything. See DECISION_LOG.md, "Logged-in users without a role".
 
 What each role may do is written once, in `ROLE_POLICIES` (`apps/accounts/policies.py`). Each
 policy is a set of independent settings:
