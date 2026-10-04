@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     "apps.registry",
     "apps.pricing",
     "apps.deliveries",
+    "apps.audit",
 ]
 
 MIDDLEWARE = [
@@ -48,6 +49,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # One append-only row per request to a protected endpoint (apps/audit/middleware.py).
+    "apps.audit.middleware.AuditLogMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

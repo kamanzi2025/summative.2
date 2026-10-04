@@ -6,6 +6,63 @@ info:
     stations. Plot deforestation-risk checks run asynchronously; deliveries are never
     blocked by them.
 paths:
+  /api/audit-log/:
+    get:
+      operationId: audit_log_list
+      description: |-
+        Who accessed farmer, plot and delivery data, newest first. Compliance auditors only.
+        Reading this list is itself recorded.
+      parameters:
+      - name: cursor
+        required: false
+        in: query
+        description: The pagination cursor value.
+        schema:
+          type: string
+      - in: query
+        name: occurred_after
+        schema:
+          type: string
+          format: date-time
+      - in: query
+        name: occurred_before
+        schema:
+          type: string
+          format: date-time
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: resource
+        schema:
+          type: string
+      - in: query
+        name: role
+        schema:
+          type: string
+      - in: query
+        name: status_code
+        schema:
+          type: integer
+      - in: query
+        name: username
+        schema:
+          type: string
+      tags:
+      - audit-log
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAuditLogList'
+          description: ''
   /api/auth/api-token/:
     post:
       operationId: auth_api_token_create
@@ -586,6 +643,70 @@ components:
         * `flagged` - Flagged
         * `error` - Error
         * `timeout` - Timeout
+    AuditLog:
+      type: object
+      description: |-
+        One request to a protected endpoint: who made it, what it returned, and which field rules
+        applied. Holds record ids only, never coordinates, national IDs or prices.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        occurred_at:
+          type: string
+          format: date-time
+          readOnly: true
+        username:
+          type: string
+          readOnly: true
+        role:
+          type: string
+          readOnly: true
+        method:
+          type: string
+          readOnly: true
+        path:
+          type: string
+          readOnly: true
+        endpoint:
+          type: string
+          readOnly: true
+        status_code:
+          type: integer
+          readOnly: true
+        resource:
+          type: string
+          readOnly: true
+        object_ids:
+          readOnly: true
+          description: Ids of the records returned, or of the record named in the
+            URL.
+        coordinate_precision:
+          type: string
+          readOnly: true
+        national_id:
+          type: string
+          readOnly: true
+          description: 'How national IDs were served: last_four or hidden.'
+        commercial_terms:
+          type: boolean
+          readOnly: true
+          nullable: true
+          description: Whether prices were included; null if the user had no role.
+      required:
+      - commercial_terms
+      - coordinate_precision
+      - endpoint
+      - id
+      - method
+      - national_id
+      - object_ids
+      - occurred_at
+      - path
+      - resource
+      - role
+      - status_code
+      - username
     AuthToken:
       type: object
       properties:
@@ -857,6 +978,25 @@ components:
         * `A` - Grade A (ripe red cherry)
         * `B` - Grade B (mixed ripeness)
         * `C` - Grade C (floaters / under-ripe)
+    PaginatedAuditLogList:
+      type: object
+      required:
+      - results
+      properties:
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cD00ODY%3D"
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?cursor=cj0xJnA9NDg3
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
     PaginatedDeliveryFeedList:
       type: object
       required:

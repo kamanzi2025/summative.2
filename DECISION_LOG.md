@@ -495,3 +495,86 @@ OpenAPI schema still documents every field, with a description saying which role
 - Masking `phone` for exporters and auditors.
 - A check (test or lint) that every serializer declaring a protected field also uses the mixin.
 - Audit logging of which precision was served to whom (next step).
+
+## Auditability: an append-only access log, one row per protected request
+
+### Decision
+
+Every request to a protected endpoint writes one `AuditLog` row. A protected endpoint is any view
+that names a `ROLE_POLICIES` resource. Each row records:
+
+- **Who:** the user (plus their username, kept even if the account is later deleted) and their
+  role.
+- **What:** method, path, route name, status code, resource, and the IDs of the records returned
+  (or the ID named in the URL).
+- **What they were shown:** the field rules applied, meaning coordinate precision, how national
+  IDs were served, and whether commercial terms were included.
+
+A row **never** stores the data itself: no coordinates, national IDs, prices, request or response
+bodies, or query strings.
+
+- The row is written by middleware (`apps/audit/middleware.py`), so no protected view can forget
+  to log.
+- Requests that were refused (`401`, `403`, `404`) are recorded too. Public endpoints (status,
+  price schedule, login) are not.
+- The log is append-only. Saving an existing row, deleting a row, and bulk `update()`/`delete()`
+  all raise `AppendOnlyError`, and the Django admin view is read-only.
+- If the row cannot be written, the request fails with `500` rather than serving data that leaves
+  no record.
+
+`GET /api/audit-log/` lists the log newest first, with filters for user, role, resource, status
+code and time range. Only `compliance_auditor` may read it (`AUDIT_LOG: read` in `ROLE_POLICIES`).
+Reading the log is itself logged.
+
+### Risk Addressed
+
+- **Unanswerable questions after an incident.** When a farmer complains, or a partner is
+  suspected of misusing data, Kawa needs to answer "who saw this farmer's record, and at what
+  precision?". Access controls alone prevent misuse but leave no evidence of what happened.
+- **Probing.** Recording refused requests (a field agent trying another station's plot IDs, a
+  roleless account calling the lists) makes attempts to probe the boundaries visible, not just
+  successful reads.
+- **The log becoming a leak itself.** A log that copied response bodies would become a second,
+  less protected copy of farmers' national IDs and farm locations. Recording only IDs and the
+  rules applied keeps the log useful for investigation without that risk.
+- **Tampering.** An editable log proves nothing. Making it append-only in the code, and giving
+  only auditors read access, stops an operator or partner from quietly changing the trail.
+
+### Alternatives Considered
+
+- **`created_by` / `updated_by` fields on each model.** These record who wrote a record, but not
+  who read it. For this case, reads matter most: an exporter viewing plot locations is exactly what
+  needs a trace.
+- **A view mixin instead of middleware.** Every view would need to include it, and a new view that
+  left it out would go unlogged. The middleware keys off `policy_resource`, which the permission
+  check already requires, so a protected view is always logged.
+- **Application log files (JSON lines).** These are already used for operations, but they rotate,
+  are hard to query by user, and cannot be served to the auditor through the API with the same
+  access rules.
+- **A third-party package (for example django-auditlog or django-simple-history).** These track
+  changes to models (who changed which field), not who read which records at what precision. Most
+  of the trail we need is reads.
+
+### Trade-off
+
+- **Cost per request.** One extra `INSERT` on every protected request. The feed query-count tests
+  now expect it, and check that the extra query is that insert.
+- **Availability.** If the log table cannot be written, the API stops serving protected data. I
+  chose this so nothing is served without a record; the cost is that a full or locked log table
+  takes the API down with it.
+- **Append-only is enforced in the code, not the database.** Someone with direct database access
+  can still change rows. Deleting a user sets `user` to empty on their rows (the username is kept),
+  which is a controlled change made by Django and the only one.
+- **Retention.** The log grows without limit. It contains usernames and record IDs, which are
+  personal data.
+- **Coverage.** Record IDs inside a list are captured from the page returned, not from everything
+  the query could reach, so the log shows what was actually served.
+
+### Deferred Work
+
+- Enforcing append-only in the database (a PostgreSQL trigger or revoking `UPDATE`/`DELETE` from
+  the app's database user).
+- A retention policy and archiving (for example, keep 2 years and move older rows to cold storage).
+- Logging login attempts (success and failure) to detect password guessing.
+- Recording the client IP address, after deciding whether that personal data is justified.
+- Alerts on patterns such as repeated `404`s on other stations' records.

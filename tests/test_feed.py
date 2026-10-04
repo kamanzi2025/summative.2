@@ -108,10 +108,12 @@ def test_cursor_is_stable_when_new_rows_arrive_between_pages(agent_api, make_del
 def test_feed_list_runs_one_query(agent_api, make_delivery, django_assert_num_queries):
     for _ in range(20):
         make_delivery()
-    # One SELECT with JOINs to plot, farmer and station, regardless of page size (no N+1).
-    with django_assert_num_queries(1):
+    # One SELECT with JOINs to plot, farmer and station, regardless of page size (no N+1),
+    # plus the audit-log INSERT that every protected request writes.
+    with django_assert_num_queries(2) as queries:
         response = agent_api.get("/api/deliveries/?page_size=20")
     assert len(response.json()["results"]) == 20
+    assert_last_query_is_audit_insert(queries)
 
 
 def test_station_feed_scopes_and_counts_queries(
@@ -119,10 +121,15 @@ def test_station_feed_scopes_and_counts_queries(
 ):
     mine = [make_delivery(station=nyaruguru).pk for _ in range(3)]
     make_delivery(station=kamonyi)
-    # 1 query to resolve the station (404 if unknown) + 1 for the page.
-    with django_assert_num_queries(2):
+    # 1 query to resolve the station (404 if unknown) + 1 for the page + 1 audit-log INSERT.
+    with django_assert_num_queries(3) as queries:
         body = agent_api.get(f"/api/stations/{nyaruguru.pk}/deliveries/").json()
     assert sorted(row["id"] for row in body["results"]) == sorted(mine)
+    assert_last_query_is_audit_insert(queries)
+
+
+def assert_last_query_is_audit_insert(queries):
+    assert queries.captured_queries[-1]["sql"].startswith('INSERT INTO "audit_auditlog"')
 
 
 def test_station_feed_unknown_station_is_404(agent_api):
