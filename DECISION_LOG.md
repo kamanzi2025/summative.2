@@ -179,3 +179,76 @@ not grant access to data.
 - Rate limiting on the login endpoints, to slow down password guessing.
 - Separate service accounts for integrations, with their own role, instead of staff credentials.
 - CSRF protection for the staff login form itself.
+
+## Seed fixtures: one idempotent command that converges on the contract values
+
+### Decision
+
+`python manage.py seed_rbac_fixtures` creates the F2 fixtures directly through the models. Every
+value is copied from `F2_CONTRACT.md`:
+
+- the three role users
+- the seed farmer
+- the four plots
+- the two deliveries
+
+Running it again updates existing rows to the seed values instead of creating new ones:
+
+- **Users** are found by username. Each run resets the password, marks the user active, and
+  resets the role and station.
+- **The farmer** is looked up by `national_id` first, then by `member_number`, and the record found
+  is updated to the seed values. The phone number, `+250788999001`, is not in the contract; I made
+  it up so it is unique.
+- **Plots** use `update_or_create` on `plot_code`.
+- **Deliveries** have fixed `client_reference` values (`seed-rbac-K1`, `seed-rbac-M1`). A delivery
+  that already exists is left unchanged.
+
+The whole run is a single transaction. If the national ID and the member number point to two
+different farmers, or another farmer already has the seed phone number, the command stops with an
+error and changes nothing.
+
+### Risk Addressed
+
+- **Duplicate national IDs.** The F1 contract flow registers the same person, Uwimana Béatrice,
+  with the same national ID but member number `KWA-F-0417`. `national_id` is unique, so creating a
+  second farmer would crash on any database where the F1 flow had already run. Looking the farmer
+  up by national ID first reuses that record.
+- **Grading against drifted data.** If a fixture user's password, role or station had been
+  changed, a "create if missing" command would leave it wrong. Resetting the values on every run
+  means the access-matrix checks always start from the contract's values.
+- **Unwanted background work.** Creating plots through `register_plot` would queue a risk check
+  with the external registry for each seed plot. `update_or_create` writes the rows directly, so
+  no Celery job is queued and the command works without Redis or a worker.
+- **Silent data damage.** When the command cannot tell which existing record is the real one, it
+  stops and asks for a person to resolve it, rather than guessing and overwriting someone's data.
+
+### Alternatives Considered
+
+- **Look up the farmer by member number only.** This is simpler, but it fails on the duplicate
+  national ID described above.
+- **Create through the HTTP API.** The contract asks for direct model writes. The API would also
+  queue risk checks, and once the policies are enforced, it would need a logged-in role user just
+  to create the fixtures.
+- **A data migration.** This would put test accounts with a known password into every database,
+  including production, with no way to opt out.
+
+### Trade-off
+
+- The command overwrites. If someone edits a seed user or the seed farmer by hand, the next run
+  undoes the edit.
+- On a database where the F1 flow ran, the F1 farmer is renamed to `KWA-F-SEED-01` with the seed
+  phone. Re-posting the F1 farmer (`KWA-F-0417`) afterwards fails with a duplicate national ID,
+  because that person now exists under the seed member number.
+- Deliveries that already exist are not updated, so a seed delivery keeps the price it was first
+  recorded at. This is deliberate: a delivery's price is a record of what the farmer was paid.
+- The seed plots start as `pending`. No check is queued at seed time, but the periodic sweeper will
+  queue them once they count as stale (after `RISK_CHECK_STALE_HOURS`), as it does for any plot
+  with no result.
+- The fixture users have a published password. The command must never be run on production.
+
+### Deferred Work
+
+- Refuse to run when `DEBUG` is off (or require a `--force` flag), so the published password
+  cannot reach a production database by accident.
+- A merge tool for the rare case where the national ID and the member number belong to two
+  different farmers.
