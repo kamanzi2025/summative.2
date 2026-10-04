@@ -9,8 +9,8 @@ from apps.pricing.services import activate_schedule
 pytestmark = pytest.mark.django_db
 
 
-def test_price_schedule_shape_and_cache_header(api):
-    response = api.get("/api/price-schedule/")
+def test_price_schedule_shape_and_cache_header(anon_api):
+    response = anon_api.get("/api/price-schedule/")
     assert response.status_code == 200
     assert response.json() == {
         "id": PriceSchedule.objects.get(is_active=True).pk,
@@ -27,16 +27,16 @@ def test_price_schedule_shape_and_cache_header(api):
     assert "max-age=60" in response.headers["Cache-Control"]
 
 
-def test_price_change_is_served_on_next_request(api):
-    api.get("/api/price-schedule/")
+def test_price_change_is_served_on_next_request(anon_api):
+    anon_api.get("/api/price-schedule/")
     PriceSchedule.objects.get(is_active=True).entries.filter(grade="A").update(price_per_kg_rwf="800.00")
-    prices = api.get("/api/price-schedule/").json()["prices"]
+    prices = anon_api.get("/api/price-schedule/").json()["prices"]
     assert prices[0] == {"grade": "A", "price_per_kg_rwf": "800.00"}
 
 
-def test_no_active_schedule_is_404(api):
+def test_no_active_schedule_is_404(anon_api):
     PriceSchedule.objects.update(is_active=False)
-    response = api.get("/api/price-schedule/")
+    response = anon_api.get("/api/price-schedule/")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "not_found"
 
@@ -54,8 +54,8 @@ def test_activate_schedule_deactivates_previous():
     assert not old.is_active and new.is_active
 
 
-def test_validation_error_envelope(api):
-    response = api.post("/api/farmers/", {}, format="json")
+def test_validation_error_envelope(agent_api):
+    response = agent_api.post("/api/farmers/", {}, format="json")
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["code"] == "validation_error"
@@ -63,21 +63,21 @@ def test_validation_error_envelope(api):
     assert error["details"]["full_name"] == ["This field is required."]
 
 
-def test_not_found_envelope(api):
-    response = api.get("/api/farmers/999999/")
+def test_not_found_envelope(agent_api):
+    response = agent_api.get("/api/farmers/999999/")
     assert response.status_code == 404
     assert response.json() == {
         "error": {"code": "not_found", "message": "No Farmer matches the given query.", "details": {}}
     }
 
 
-def test_method_not_allowed_envelope(api):
-    response = api.delete("/api/price-schedule/")
+def test_method_not_allowed_envelope(anon_api):
+    response = anon_api.delete("/api/price-schedule/")
     assert response.status_code == 405
     assert response.json()["error"]["code"] == "method_not_allowed"
 
 
-def test_malformed_json_envelope(api):
-    response = api.post("/api/farmers/", "{not json", content_type="application/json")
+def test_malformed_json_envelope(agent_api):
+    response = agent_api.post("/api/farmers/", "{not json", content_type="application/json")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "parse_error"

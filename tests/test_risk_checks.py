@@ -218,7 +218,7 @@ class TestSimulatedRegistry:
         sleep.assert_called_once_with(5)
 
 
-def test_status_reports_the_risk_check_backlog(api, make_plot, settings):
+def test_status_reports_the_risk_check_backlog(anon_api, make_plot, settings):
     """A stalled worker is visible on /api/status/ without failing the liveness probe."""
     settings.RISK_CHECK_STALE_HOURS = 6
     settings.RISK_CHECK_MANUAL_REVIEW_DAYS = 7
@@ -227,7 +227,7 @@ def test_status_reports_the_risk_check_backlog(api, make_plot, settings):
     make_plot(created_at=timezone.now() - timedelta(days=8), risk_status=RiskStatus.UNVERIFIED)
     make_plot(risk_status=RiskStatus.CLEAR)
 
-    body = api.get("/api/status/").json()
+    body = anon_api.get("/api/status/").json()
 
     assert body["status"] == "ok"
     backlog = body["risk_checks"]
@@ -238,7 +238,7 @@ def test_status_reports_the_risk_check_backlog(api, make_plot, settings):
     assert backlog["healthy"] is False
 
 
-def test_status_is_healthy_with_no_backlog(api, db):
-    backlog = api.get("/api/status/").json()["risk_checks"]
+def test_status_is_healthy_with_no_backlog(anon_api, db):
+    backlog = anon_api.get("/api/status/").json()["risk_checks"]
     assert backlog["stale"] == 0
     assert backlog["healthy"] is True

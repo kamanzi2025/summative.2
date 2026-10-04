@@ -2,6 +2,7 @@ from django.conf import settings
 from django.utils.cache import patch_cache_control
 from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import NotFound
+from rest_framework.permissions import AllowAny
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,8 +16,10 @@ class PriceScheduleView(APIView):
 
     Not cached on the server: every request reads the database, so a price change is visible to
     the next request. Clients may reuse a response for PRICE_SCHEDULE_MAX_AGE_SECONDS (default
-    60 s), which is the whole staleness window.
+    60 s), which is the whole staleness window. Public: it is the published price list.
     """
+
+    permission_classes = [AllowAny]
 
     @extend_schema(responses=PriceScheduleSerializer)
     def get(self, request: Request) -> Response:

@@ -9,13 +9,15 @@ from apps.registry.models import Plot, RiskStatus
 pytestmark = pytest.mark.django_db
 
 
-def test_create_plot_returns_pending_and_enqueues_on_commit(api, plot_payload, django_capture_on_commit_callbacks):
+def test_create_plot_returns_pending_and_enqueues_on_commit(
+    agent_api, plot_payload, django_capture_on_commit_callbacks
+):
     with (
         patch("apps.registry.tasks.run_risk_check.delay") as delay,
         patch("apps.registry.tasks.get_registry_client") as registry,
     ):
         with django_capture_on_commit_callbacks(execute=False) as callbacks:
-            response = api.post("/api/plots/", plot_payload, format="json")
+            response = agent_api.post("/api/plots/", plot_payload, format="json")
         # Nothing is published until the plot row is committed.
         delay.assert_not_called()
         assert len(callbacks) == 1
@@ -30,24 +32,24 @@ def test_create_plot_returns_pending_and_enqueues_on_commit(api, plot_payload, d
     registry.assert_not_called()  # the registry is never called inside the request
 
 
-def test_broker_outage_does_not_fail_registration(api, plot_payload, django_capture_on_commit_callbacks):
+def test_broker_outage_does_not_fail_registration(agent_api, plot_payload, django_capture_on_commit_callbacks):
     with (
         patch("apps.registry.tasks.run_risk_check.delay", side_effect=OperationalError("redis down")),
         django_capture_on_commit_callbacks(execute=True),
     ):
-        response = api.post("/api/plots/", plot_payload, format="json")
+        response = agent_api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 201
     assert Plot.objects.get().risk_status == RiskStatus.PENDING
 
 
-def test_list_plots_filters(api, make_plot, make_farmer, kamonyi):
+def test_list_plots_filters(agent_api, make_plot, make_farmer, kamonyi):
     owner = make_farmer()
     mine = make_plot(farmer=owner, risk_status=RiskStatus.CLEAR)
     make_plot(risk_status=RiskStatus.PENDING)
     other_station = make_plot(washing_station=kamonyi)
 
     def ids(query: str) -> list[int]:
-        return [row["id"] for row in api.get(f"/api/plots/?{query}").json()["results"]]
+        return [row["id"] for row in agent_api.get(f"/api/plots/?{query}").json()["results"]]
 
     assert ids(f"farmer={owner.pk}") == [mine.pk]
     assert ids("risk_status=clear") == [mine.pk]
@@ -55,24 +57,24 @@ def test_list_plots_filters(api, make_plot, make_farmer, kamonyi):
     assert len(ids("sector=kigoma")) == 3
 
 
-def test_risk_check_history_endpoint(api, make_plot):
+def test_risk_check_history_endpoint(agent_api, make_plot):
     plot = make_plot()
     plot.risk_checks.create(attempt_number=1, outcome="error", error_message="503")
     plot.risk_checks.create(attempt_number=2, outcome="clear")
-    history = api.get(f"/api/plots/{plot.pk}/risk-checks/").json()
+    history = agent_api.get(f"/api/plots/{plot.pk}/risk-checks/").json()
     assert [(a["attempt_number"], a["outcome"]) for a in history] == [(1, "error"), (2, "clear")]
 
 
-def test_missing_sector_is_rejected(api, plot_payload):
+def test_missing_sector_is_rejected(agent_api, plot_payload):
     del plot_payload["sector"]
-    response = api.post("/api/plots/", plot_payload, format="json")
+    response = agent_api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 400
     assert response.json()["error"]["details"]["sector"] == ["This field is required."]
 
 
-def test_unknown_sector_is_rejected(api, plot_payload):
+def test_unknown_sector_is_rejected(agent_api, plot_payload):
     plot_payload["sector"] = "Atlantis"
-    response = api.post("/api/plots/", plot_payload, format="json")
+    response = agent_api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 400
     assert "sector" in response.json()["error"]["details"]
 
@@ -88,35 +90,37 @@ def test_unknown_sector_is_rejected(api, plot_payload):
         ("longitude", "28.0"),
     ],
 )
-def test_coordinates_outside_rwanda_are_rejected(api, plot_payload, field, value):
+def test_coordinates_outside_rwanda_are_rejected(agent_api, plot_payload, field, value):
     plot_payload[field] = value
-    response = api.post("/api/plots/", plot_payload, format="json")
+    response = agent_api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 400
     assert field in response.json()["error"]["details"]
 
 
-def test_f2_fixture_plot_m2_latitude_is_accepted(api, plot_payload):
+def test_f2_fixture_plot_m2_latitude_is_accepted(agent_api, plot_payload):
     # M2 (-2.90) sits just south of the real border; the padded bounding box must still accept it.
     plot_payload.update({"plot_code": "KWA-SEED-M2", "latitude": "-2.900000", "longitude": "29.900000"})
     with patch("apps.registry.tasks.run_risk_check.delay"):
-        response = api.post("/api/plots/", plot_payload, format="json")
+        response = agent_api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 201, response.json()
     assert Plot.objects.get(plot_code="KWA-SEED-M2").latitude == Decimal("-2.900000")
 
 
 @pytest.mark.parametrize("area", ["0", "-0.5", "51"])
-def test_area_out_of_range_is_rejected(api, plot_payload, area):
+def test_area_out_of_range_is_rejected(agent_api, plot_payload, area):
     plot_payload["area_hectares"] = area
-    response = api.post("/api/plots/", plot_payload, format="json")
+    response = agent_api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 400
     assert "area_hectares" in response.json()["error"]["details"]
 
 
-def test_identical_plot_resend_replays_without_second_check(api, plot_payload, django_capture_on_commit_callbacks):
+def test_identical_plot_resend_replays_without_second_check(
+    agent_api, plot_payload, django_capture_on_commit_callbacks
+):
     with patch("apps.registry.tasks.run_risk_check.delay") as delay:
         with django_capture_on_commit_callbacks(execute=True):
-            first = api.post("/api/plots/", plot_payload, format="json")
-            replay = api.post("/api/plots/", {**plot_payload, "sector": "kigoma"}, format="json")
+            first = agent_api.post("/api/plots/", plot_payload, format="json")
+            replay = agent_api.post("/api/plots/", {**plot_payload, "sector": "kigoma"}, format="json")
     assert first.status_code == 201
     assert replay.status_code == 200 and replay.headers["Idempotent-Replayed"] == "true"
     assert replay.json()["id"] == first.json()["id"]
@@ -124,14 +128,14 @@ def test_identical_plot_resend_replays_without_second_check(api, plot_payload, d
     assert Plot.objects.count() == 1
 
 
-def test_plot_code_reused_with_different_details_is_a_conflict(api, plot_payload, make_plot):
+def test_plot_code_reused_with_different_details_is_a_conflict(agent_api, plot_payload, make_plot):
     existing = make_plot(plot_code="KWA-P-0417-A")
-    response = api.post("/api/plots/", plot_payload, format="json")
+    response = agent_api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 409
     assert response.json()["error"]["details"] == {"id": existing.pk, "mismatched_fields": ["farmer"]}
 
 
-def test_manual_review_queue_filter(api, make_plot, settings):
+def test_manual_review_queue_filter(agent_api, make_plot, settings):
     from datetime import timedelta
 
     from django.utils import timezone
@@ -141,7 +145,7 @@ def test_manual_review_queue_filter(api, make_plot, settings):
     make_plot(risk_status=RiskStatus.UNVERIFIED)  # unverified, but still inside the window
     make_plot(risk_status=RiskStatus.CLEAR, created_at=timezone.now() - timedelta(days=9))
 
-    queue = api.get("/api/plots/?requires_manual_review=true").json()["results"]
+    queue = agent_api.get("/api/plots/?requires_manual_review=true").json()["results"]
     assert [row["id"] for row in queue] == [overdue.pk]
     assert queue[0]["requires_manual_review"] is True
-    assert len(api.get("/api/plots/?requires_manual_review=false").json()["results"]) == 2
+    assert len(agent_api.get("/api/plots/?requires_manual_review=false").json()["results"]) == 2

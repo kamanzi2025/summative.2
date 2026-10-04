@@ -94,3 +94,88 @@ the API.
 - Connecting the policy to views, querysets and serializers. This includes making the API
   authenticated by default and replacing `AllowAny`.
 - Roles that cover several stations, if a field agent ever covers more than one.
+
+## Authentication: sessions for staff in the browser, tokens for system integrations
+
+### Decision
+
+The API accepts two ways of proving who you are. Both are set in `DEFAULT_AUTHENTICATION_CLASSES`:
+
+- **Session authentication**, for staff using the browser or the Django admin.
+  `POST /api/auth/staff-login/` checks the username and password and starts a Django session
+  (a `sessionid` cookie).
+- **Token authentication** (DRF `authtoken`), for system integrations such as the registry
+  integration or a partner's import job. `POST /api/auth/api-token/` exchanges a username and
+  password for a token, which the system sends on every request as `Authorization: Token <key>`.
+  No session is created.
+
+Both endpoints return `{"token": "<key>"}`. Each user has one token, so logging in again returns
+the same token.
+
+`DEFAULT_PERMISSION_CLASSES` is now `IsAuthenticated`, so every endpoint is closed unless it says
+otherwise. Only four endpoints are marked `AllowAny`, and each one does so explicitly:
+
+- `/api/status/`, so a load balancer can check the API without credentials
+- `/api/price-schedule/`, because it is the published price list
+- the two login endpoints
+
+Anonymous requests to anything else get `401` with a `WWW-Authenticate: Token` header.
+
+**Both methods produce the same `request.user`.** DRF tries each authentication class in turn and
+stops at the first one that recognises the request. Either way the view receives the same Django
+`User` object, so the permission and filtering code does not need to know, or care, how the user
+logged in.
+
+**Authentication is not authorization.** Authentication answers "who is this?" and is all this
+step adds. Authorization answers "what may this person see or do?" and is answered separately by
+`ROLE_POLICIES` (see the role model entry). This is why the login endpoints accept any valid
+user, including the contract's `grader_user`, who has no role. Logging in proves identity; it does
+not grant access to data.
+
+### Risk Addressed
+
+- In F1, anyone who could reach the API could read and change farmers' personal data, plot
+  locations and delivery payments. Now every endpoint except the public four needs a known user.
+- Sessions suit people: the browser stores the cookie, staff can log out, and Django's CSRF
+  protection stops another website from making requests using a logged-in staff member's
+  session. (Tests check that a session write without a CSRF token is refused.)
+- Tokens suit machines: a script cannot easily fill in a login form or handle cookies and CSRF,
+  but it can send a header. Token requests are not open to CSRF, because a browser never attaches
+  the header automatically.
+- Deny by default: a new endpoint is closed unless someone deliberately opens it.
+
+### Alternatives Considered
+
+- **JWT (for example `djangorestframework-simplejwt`).** Rejected for now. The main benefit of
+  JWT is that a server can check a token without a database lookup, which matters when many
+  services share one login. Here a single Django app checks every token, and the token lookup is
+  one indexed query. The cost of JWT would be real: a JWT stays valid until it expires even after
+  the user is deactivated or their role changes, unless we also build a blocklist. With a
+  database token, deleting the row or deactivating the user takes effect on the very next
+  request. For an API that controls access to farmers' national IDs, being able to revoke access
+  immediately is worth more than avoiding the lookup.
+- **Session only.** The F2 contract requires session authentication, but integrations would then
+  have to handle cookies and CSRF tokens, which is fragile for scripts.
+- **Token only.** This would break staff use in the browser and the admin, and the contract
+  requires session authentication.
+
+### Trade-off
+
+- DRF tokens never expire. A leaked token works until an admin deletes it.
+- A token is stored in the database as plain text (the DRF default). Anyone with read access to
+  the database can use the tokens in it.
+- Staff login also returns a token, which the contract asks for. A browser user therefore holds
+  both a session and a token.
+- The login endpoints skip authentication and CSRF checks for the login request itself. This lets
+  someone log in again despite a stale cookie or a bad header, but it leaves login open to "login
+  CSRF", where another site logs a victim into an attacker's account.
+- Two login methods mean two code paths to test. The tests cover both, from start to finish.
+
+### Deferred Work
+
+- Token expiry and rotation: tokens that expire after a set time, an endpoint to rotate a token,
+  and storing a hash of each token instead of the plain value.
+- A logout endpoint that ends the session and optionally deletes the token.
+- Rate limiting on the login endpoints, to slow down password guessing.
+- Separate service accounts for integrations, with their own role, instead of staff credentials.
+- CSRF protection for the staff login form itself.

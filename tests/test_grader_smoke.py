@@ -4,6 +4,9 @@ The grader does not use pytest: it runs `manage.py migrate` and then drives the 
 django.test.Client inside `manage.py shell`, on a fresh database, with a `.env` copied from
 `.env.example`. Outside the pytest runner Django does NOT add "testserver" to ALLOWED_HOSTS, so
 a check like this is the only way to catch configuration problems the in-process tests hide.
+
+Since F2 the protected endpoints refuse anonymous callers, so the script checks that first and
+then repeats the F1 flow as a field agent logged in with a real Django session.
 """
 
 import json
@@ -16,9 +19,26 @@ ROOT = Path(__file__).resolve().parent.parent
 
 GRADER_SCRIPT = """
 import json
+from django.contrib.auth.models import User
 from django.test import Client
+from apps.accounts.models import Role, UserProfile
+from apps.registry.models import WashingStation
 
+anonymous = Client()
+anon = {
+    "lists": [anonymous.get(p).status_code for p in ("/api/farmers/", "/api/plots/", "/api/deliveries/")],
+    "farmer_post": anonymous.post("/api/farmers/", data="{}", content_type="application/json").status_code,
+    "status": anonymous.get("/api/status/").status_code,
+    "price_schedule": anonymous.get("/api/price-schedule/").status_code,
+}
+
+agent, _ = User.objects.get_or_create(username="smoke_agent")
+UserProfile.objects.get_or_create(
+    user=agent,
+    defaults={"role": Role.FIELD_AGENT, "washing_station": WashingStation.objects.get(name="Nyaruguru")},
+)
 client = Client()
+client.force_login(agent)
 status = client.get("/api/status/")
 farmer = client.post("/api/farmers/", data=json.dumps({
     "full_name": "Uwimana Béatrice", "member_number": "KWA-F-0417", "cooperative": "Huye",
@@ -31,6 +51,7 @@ delivery = client.post("/api/deliveries/", data=json.dumps({
     "plot": plot.json()["id"], "washing_station": "Nyaruguru", "weight_kg": "38.5", "grade": "A",
     "delivered_on": "2026-03-14"}), content_type="application/json")
 print("GRADER_RESULT " + json.dumps({
+    "anonymous": anon,
     "status": status.status_code,
     "farmer": [farmer.status_code, farmer.json().get("id")],
     "plot": [plot.status_code, plot.json().get("id")],
@@ -68,6 +89,11 @@ def test_contract_flow_as_the_grader_runs_it(tmp_path):
     first, second = (run_grader_script(env) for _ in range(2))
 
     for result in (first, second):
+        anon = result["anonymous"]
+        assert all(code in (401, 403) for code in anon["lists"]), anon
+        assert anon["farmer_post"] in (401, 403)
+        assert anon["status"] == 200 and anon["price_schedule"] == 200
+
         assert result["status"] == 200
         assert isinstance(result["farmer"][1], int)
         assert isinstance(result["plot"][1], int)

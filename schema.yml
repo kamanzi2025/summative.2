@@ -6,6 +6,55 @@ info:
     stations. Plot deforestation-risk checks run asynchronously; deliveries are never
     blocked by them.
 paths:
+  /api/auth/api-token/:
+    post:
+      operationId: auth_api_token_create
+      description: |-
+        System integrations: exchange credentials for a token sent as `Authorization: Token <key>`.
+        No session is created.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthTokenRequest'
+        required: true
+      security:
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthToken'
+          description: ''
+        '400':
+          description: Wrong username or password.
+  /api/auth/staff-login/:
+    post:
+      operationId: auth_staff_login_create
+      description: 'Staff in the browser: starts a Django session (cookie) and also
+        returns the user''s token.'
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthTokenRequest'
+        required: true
+      security:
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthToken'
+          description: ''
+        '400':
+          description: Wrong username or password.
   /api/deliveries/:
     get:
       operationId: deliveries_list
@@ -66,9 +115,8 @@ paths:
       tags:
       - deliveries
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -89,9 +137,8 @@ paths:
               $ref: '#/components/schemas/DeliveryRequest'
         required: true
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '201':
           content:
@@ -122,9 +169,8 @@ paths:
       tags:
       - deliveries
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -153,9 +199,8 @@ paths:
       tags:
       - farmers
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -176,9 +221,8 @@ paths:
               $ref: '#/components/schemas/FarmerRequest'
         required: true
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '201':
           content:
@@ -209,9 +253,8 @@ paths:
       tags:
       - farmers
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -272,9 +315,8 @@ paths:
       tags:
       - plots
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -297,9 +339,8 @@ paths:
               $ref: '#/components/schemas/PlotRequest'
         required: true
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '201':
           content:
@@ -332,9 +373,8 @@ paths:
       tags:
       - plots
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -357,9 +397,8 @@ paths:
       tags:
       - plots
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -377,12 +416,12 @@ paths:
 
         Not cached on the server: every request reads the database, so a price change is visible to
         the next request. Clients may reuse a response for PRICE_SCHEDULE_MAX_AGE_SECONDS (default
-        60 s), which is the whole staleness window.
+        60 s), which is the whole staleness window. Public: it is the published price list.
       tags:
       - price-schedule
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
       - {}
       responses:
         '200':
@@ -397,9 +436,8 @@ paths:
       tags:
       - stations
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -422,9 +460,8 @@ paths:
       tags:
       - stations
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -496,9 +533,8 @@ paths:
       tags:
       - stations
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
-      - {}
       responses:
         '200':
           content:
@@ -514,11 +550,12 @@ paths:
 
         `status` stays "ok" while the API can serve requests: a registry or worker problem must not
         make a load balancer pull a healthy API. `risk_checks.healthy` is false when plots are stale.
+        Public, so a load balancer can probe it without credentials.
       tags:
       - status
       security:
+      - tokenAuth: []
       - cookieAuth: []
-      - basicAuth: []
       - {}
       responses:
         '200':
@@ -543,6 +580,27 @@ components:
         * `flagged` - Flagged
         * `error` - Error
         * `timeout` - Timeout
+    AuthToken:
+      type: object
+      properties:
+        token:
+          type: string
+      required:
+      - token
+    AuthTokenRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          writeOnly: true
+          minLength: 1
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+      required:
+      - password
+      - username
     Delivery:
       type: object
       description: Full delivery record, used to record a delivery and to read one
@@ -1088,10 +1146,12 @@ components:
       - name
       - sector
   securitySchemes:
-    basicAuth:
-      type: http
-      scheme: basic
     cookieAuth:
       type: apiKey
       in: cookie
       name: sessionid
+    tokenAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Token-based authentication with required prefix "Token"

@@ -2,6 +2,7 @@ from django.http import HttpRequest, JsonResponse
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers
+from rest_framework.permissions import AllowAny
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -16,7 +17,10 @@ class StatusView(APIView):
 
     `status` stays "ok" while the API can serve requests: a registry or worker problem must not
     make a load balancer pull a healthy API. `risk_checks.healthy` is false when plots are stale.
+    Public, so a load balancer can probe it without credentials.
     """
+
+    permission_classes = [AllowAny]
 
     @extend_schema(
         responses=inline_serializer(

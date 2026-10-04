@@ -3,9 +3,13 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 
+from apps.accounts.models import Role, UserProfile
 from apps.registry.models import Farmer, Plot, RiskStatus, Sector, WashingStation
+
+STAFF_PASSWORD = "GraderPass123!"
 
 
 @pytest.fixture(autouse=True)
@@ -14,11 +18,52 @@ def _fast_registry(settings: Any) -> None:
     settings.RISK_REGISTRY_MIN_LATENCY = 0
     settings.RISK_REGISTRY_MAX_LATENCY = 0
     settings.CELERY_TASK_ALWAYS_EAGER = False
+    # Every API test creates a staff user; real PBKDF2 hashing would dominate the suite's runtime.
+    settings.PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
 
 @pytest.fixture
-def api() -> APIClient:
+def anon_api() -> APIClient:
+    """No credentials: only /api/status/, /api/price-schedule/ and the auth endpoints answer."""
     return APIClient()
+
+
+@pytest.fixture
+def make_staff_user(db: None) -> Callable[..., User]:
+    """A user with a role profile; field agents default to the Nyaruguru station."""
+
+    def _make(role: str | None, *, station: WashingStation | None = None, username: str | None = None) -> User:
+        user = User.objects.create_user(username=username or f"{role or 'no_role'}_user", password=STAFF_PASSWORD)
+        if role is not None:
+            if role == Role.FIELD_AGENT and station is None:
+                station = WashingStation.objects.get(name="Nyaruguru")
+            UserProfile.objects.create(user=user, role=role, washing_station=station)
+        return User.objects.select_related("profile__washing_station").get(pk=user.pk)
+
+    return _make
+
+
+def _client_for(user: User) -> APIClient:
+    # force_authenticate skips the session/token lookup, so query-count tests measure the view
+    # alone. tests/test_auth.py drives real session and token authentication end to end.
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+@pytest.fixture
+def agent_api(make_staff_user: Callable[..., User]) -> APIClient:
+    return _client_for(make_staff_user(Role.FIELD_AGENT))
+
+
+@pytest.fixture
+def exporter_api(make_staff_user: Callable[..., User]) -> APIClient:
+    return _client_for(make_staff_user(Role.EXPORTER_PARTNER))
+
+
+@pytest.fixture
+def auditor_api(make_staff_user: Callable[..., User]) -> APIClient:
+    return _client_for(make_staff_user(Role.COMPLIANCE_AUDITOR))
 
 
 @pytest.fixture
