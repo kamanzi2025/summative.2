@@ -340,3 +340,75 @@ never returns `403`.
 - Field-level rules on top of record scope (step 7): masking national IDs, coarsening coordinates
   for exporters, and removing commercial terms for auditors.
 - Field agents covering more than one station.
+
+## Coordinate precision by role: exporters get the sector's reference point
+
+### Decision
+
+Each `Sector` now stores a reference point (`centroid_latitude`, `centroid_longitude`). Exporter
+partners will receive that point in place of a plot's own coordinates. Field agents and compliance
+auditors keep full stored precision. This step adds the data; serving it in API responses comes
+with the field rules in the next step.
+
+Three migrations add the points:
+
+1. `0006`: add both fields, allowing empty values.
+2. `0007`: fill in the six seeded sectors.
+3. `0008`: make both fields required and add a constraint keeping the point inside Rwanda's
+   bounding box (the same check plots get).
+
+The fill step stops with a clear error if any sector is missing a point. The steps are separate
+migrations because on PostgreSQL, updating rows and then altering the same table within one
+transaction can fail.
+
+The points are **approximate sector centres**, accurate to roughly 0.01° (about 1 km). They are not
+surveyed centroids, and they are stored to 4 decimal places on purpose. Their only job is to be
+one shared point per sector.
+
+### Risk Addressed
+
+- **Locating a farm.** An exact plot coordinate leads straight to a smallholder's land, and so to
+  the farmer. Exporters need to know where coffee comes from at the sector level (traceability and
+  origin marketing), not which field it came from.
+- **Rounding does not hide a location.** Rounding keeps part of the real coordinate in every
+  answer. With enough decimal places, two plots in the same sector come out different, so the
+  partner can tell them apart. With too few, plots in different sectors look the same. The F2
+  fixtures are designed so that no single rounding precision passes. A reference point keyed to
+  the sector gives every plot in the sector the same answer, and the answer reveals nothing about
+  where inside the sector the plot is.
+- **A reference point that happens to equal a rounded coordinate.** That would leak the plot
+  location it matches. Tests check every reference point against every rounding (0 to 6 decimal
+  places, three rounding methods) of every fixture coordinate. They also check that the Kigoma
+  and Mbazi points differ, and confirm that rounding alone cannot meet the contract.
+
+### Alternatives Considered
+
+- **Rounding to fewer decimal places.** Rejected for the reasons above, and the contract rules it
+  out.
+- **Random jitter (adding noise to each plot).** Repeated requests, or several plots, can be
+  averaged to remove the noise. It also makes each plot's answer different, which breaks the "same
+  sector, same point" rule.
+- **Computing the centre of the sector's plots.** The point would move every time a plot is added,
+  and with only one or two plots it would sit close to a real farm.
+- **Surveyed centroids from official boundary data** (NISR/RLMUA sector polygons). These would be
+  more accurate, but they need boundary data and a geometry library, and for this purpose an
+  approximate point does the same job.
+- **No location at all for exporters.** This would fail the contract, and partners do need sector
+  origin for traceability.
+
+### Trade-off
+
+- An exporter cannot tell two plots in the same sector apart by location. This is the intended
+  effect.
+- The points are approximate, so the location shown on an exporter's map is not the true centre of
+  the sector.
+- Every new sector needs a reference point before it can be saved. Adding a sector is now a data
+  change that needs a short review.
+- A sector with very few plots still narrows the search: if a sector has one plot, the exporter
+  knows that plot is in that sector.
+
+### Deferred Work
+
+- Replacing the approximate points with centroids computed from official sector boundary polygons.
+- Serving the point to exporters, including inside nested plot data (next step).
+- A minimum number of plots per sector before plot-level data is shared with partners at all.

@@ -79,8 +79,8 @@ class PlotViewSet(
     @extend_schema(responses=RiskCheckAttemptSerializer(many=True))
     @action(detail=True, methods=["get"], url_path="risk-checks", pagination_class=None, filterset_class=None)
     def risk_checks(self, request: Request, pk: str | None = None) -> Response:
-        """Every registry call made for this plot, oldest first: evidence of retries.
-        get_object() starts from the scoped queryset, so another station's plot is a 404."""
+        """Every registry call made for this plot, oldest first: evidence of retries."""
+        # get_object() starts from the scoped queryset, so another station's plot is a 404.
         plot = self.get_object()
         attempts = plot.risk_checks.order_by("attempt_number")
         return Response(RiskCheckAttemptSerializer(attempts, many=True).data)

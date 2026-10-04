@@ -5,7 +5,7 @@ from .models import Farmer, Plot, RiskCheckAttempt, Sector, WashingStation
 
 @admin.register(Sector)
 class SectorAdmin(admin.ModelAdmin):
-    list_display = ["name", "district"]
+    list_display = ["name", "district", "centroid_latitude", "centroid_longitude"]
 
 
 @admin.register(WashingStation)

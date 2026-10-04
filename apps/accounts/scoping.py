@@ -29,11 +29,12 @@ class StationScopedQuerySet(models.QuerySet):
         return self.none() if station_id is None else self.filter(self.own_station_q(station_id))
 
 
+# For serializers: every related field whose queryset supports visible_to() is narrowed to the
+# requesting user, so a write can only point at records they may see. An out-of-scope id or name
+# fails validation as "does not exist", the same as one that really does not exist.
+# A comment, not a docstring: serializers without their own docstring would inherit it, and
+# drf-spectacular would publish it as the component description in schema.yml.
 class ScopedRelationsMixin:
-    """For serializers: every related field whose queryset supports visible_to() is narrowed to
-    the requesting user, so a write can only point at records they may see. An out-of-scope id or
-    name fails validation as "does not exist", the same as one that really does not exist."""
-
     def get_fields(self) -> dict[str, Any]:
         fields: dict[str, Any] = super().get_fields()  # type: ignore[misc]
         request = self.context.get("request")  # type: ignore[attr-defined]

@@ -21,12 +21,27 @@ class Sector(models.Model):
 
     name = models.CharField(max_length=80, unique=True)
     district = models.CharField(max_length=80)
+    # The sector's reference point: what exporters receive instead of a plot's own coordinates,
+    # so every plot in the sector reports the same location (see DECISION_LOG.md).
+    centroid_latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    centroid_longitude = models.DecimalField(max_digits=9, decimal_places=6)
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(centroid_latitude__gte=RWANDA_LAT_MIN, centroid_latitude__lte=RWANDA_LAT_MAX)
+                & Q(centroid_longitude__gte=RWANDA_LON_MIN, centroid_longitude__lte=RWANDA_LON_MAX),
+                name="sector_centroid_inside_rwanda",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.name} ({self.district})"
+
+    @property
+    def reference_point(self) -> tuple[Decimal, Decimal]:
+        return self.centroid_latitude, self.centroid_longitude
 
 
 class WashingStationQuerySet(StationScopedQuerySet):
