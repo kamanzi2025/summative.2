@@ -412,3 +412,86 @@ one shared point per sector.
 - Replacing the approximate points with centroids computed from official sector boundary polygons.
 - Serving the point to exporters, including inside nested plot data (next step).
 - A minimum number of plots per sector before plot-level data is shared with partners at all.
+
+## Privacy: field-level rules for national IDs, coordinates and commercial terms
+
+### Decision
+
+On top of record scope, each role now sees a different version of the same record. The rules
+come from `ROLE_POLICIES` and are applied by `apps/accounts/field_rules.py`:
+
+| Field | Field agent | Exporter partner | Compliance auditor |
+|---|---|---|---|
+| `national_id` | last 4 digits (`************6789`) | removed | removed |
+| `latitude` / `longitude` | stored value | sector reference point | stored value |
+| `unit_price_rwf` / `amount_due_rwf` | shown | shown | removed |
+
+There are two mechanisms, both driven by the requesting user's policy:
+
+- **Custom field classes** (`NationalIdField`, `CoordinateField`, `CommercialTermField`). Each field
+  carries its own rule, so the rule applies wherever the field appears: list, detail, create,
+  idempotent replay, the station feed, and any serializer that nests a plot or farmer inside
+  another response. A nested serializer shares its parent's request, so a nested plot copy is
+  coarsened exactly like a top-level one. A test nests plots inside a station response to prove
+  this.
+- **A `get_fields()` mixin** (`PolicyFieldsMixin`). This removes hidden fields from the response
+  entirely, rather than returning them as `null` or masked. An exporter's or auditor's farmer
+  record has no `national_id` key at all.
+
+Plots also gain a read-only `coordinate_precision` field (`full` or `sector`), so a partner's
+system knows it has a sector point and not the farm's location.
+
+A serializer used without a request, or for a user with no policy, falls back to the most
+restrictive rules: no national ID, sector coordinates, no commercial terms. The views already
+refuse such users, so this only guards code that serializes data outside a request. The published
+OpenAPI schema still documents every field, with a description saying which roles receive it.
+
+### Risk Addressed
+
+- **National IDs.** A full national ID is enough to impersonate a farmer with mobile-money
+  agents and government services. Field agents need the last four digits to confirm they have the
+  right person at the scale. Exporters and auditors have no use for it, so they get nothing,
+  including no masked form, which would still be a partial identifier.
+- **Farm locations shared with commercial partners.** Exporters get the sector reference point
+  (see the coordinate precision entry). This also covers the plot detail route and any nested
+  copy, not just the list.
+- **Prices shown to auditors.** Prices and amounts paid are commercially sensitive between Kawa
+  and its partners. A compliance audit needs to know what was delivered, when and from which plot
+  (weight, grade, date, risk status at delivery), not what was paid. Removing the fields keeps the
+  auditor's access to exactly what the audit needs.
+- **A forgotten response.** Putting the rule in the field, rather than in each view, means a new
+  endpoint or nested serializer that uses the field gets the rule automatically.
+
+### Alternatives Considered
+
+- **A separate serializer per role** (for example `ExporterPlotSerializer`). Three roles times
+  four resources means many near-identical classes, and every new field must be added to all of
+  them. Forgetting one would leak the field to that role.
+- **Masking in the views after serialization.** Nested copies, replay responses and new views are
+  easy to miss, and the view would need to know every field's rule.
+- **Returning hidden fields as `null`.** The key still tells the reader the data exists, and the
+  F2 contract requires that the field does not appear at all.
+- **Masking the national ID for exporters too** (last 4 digits). The contract forbids even the
+  masked form for exporters and auditors, and they have no need for it.
+- **Masking in the database** (storing only the last 4 digits). Field agents and the registration
+  check for duplicate IDs still need the full value.
+
+### Trade-off
+
+- Each field rule depends on the serializer having the mixin and the request in its context. The
+  fail-closed fallback covers a missing request. A new serializer that declares a protected field
+  but leaves out the mixin would still mask or coarsen correctly, but would not remove fields that
+  should be hidden. This is a remaining risk to review for.
+- One OpenAPI schema describes all roles, so it lists fields that some roles never receive. Each
+  field's description says who gets it.
+- `coordinate_precision` adds a field to every plot response.
+- Phone numbers and farmer names are still visible to all three roles. The contract does not
+  cover them.
+- Values a user submits on create (for example a full national ID) are stored in full, as they
+  must be. Only the response is masked.
+
+### Deferred Work
+
+- Masking `phone` for exporters and auditors.
+- A check (test or lint) that every serializer declaring a protected field also uses the mixin.
+- Audit logging of which precision was served to whom (next step).

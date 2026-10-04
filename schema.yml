@@ -607,6 +607,11 @@ components:
       required:
       - password
       - username
+    CoordinatePrecisionEnum:
+      enum:
+      - full
+      - sector
+      type: string
     Delivery:
       type: object
       description: Full delivery record, used to record a delivery and to read one
@@ -649,11 +654,13 @@ components:
           format: decimal
           pattern: ^-?\d{0,8}(?:\.\d{0,2})?$
           readOnly: true
+          description: 'Commercial term: absent for compliance auditors.'
         amount_due_rwf:
           type: string
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          description: 'Commercial term: absent for compliance auditors.'
         plot_risk_status_at_delivery:
           allOf:
           - $ref: '#/components/schemas/RiskStatusEnum'
@@ -718,6 +725,7 @@ components:
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          description: 'Commercial term: absent for compliance auditors.'
         delivered_on:
           type: string
           format: date
@@ -791,6 +799,8 @@ components:
         national_id:
           type: string
           nullable: true
+          description: 16 digits. Read back as its last 4 digits for field agents;
+            absent for other roles.
           maxLength: 16
         home_station:
           type: string
@@ -826,6 +836,8 @@ components:
         national_id:
           type: string
           nullable: true
+          description: 16 digits. Read back as its last 4 digits for field agents;
+            absent for other roles.
           maxLength: 16
         home_station:
           type: string
@@ -924,10 +936,16 @@ components:
           type: string
           format: decimal
           pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          description: Stored value for field agents and auditors. For exporter partners,
+            the sector's reference point (identical for every plot in the sector);
+            see coordinate_precision.
         longitude:
           type: string
           format: decimal
           pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          description: Stored value for field agents and auditors. For exporter partners,
+            the sector's reference point (identical for every plot in the sector);
+            see coordinate_precision.
         area_hectares:
           type: string
           format: decimal
@@ -944,12 +962,19 @@ components:
         requires_manual_review:
           type: boolean
           readOnly: true
+        coordinate_precision:
+          allOf:
+          - $ref: '#/components/schemas/CoordinatePrecisionEnum'
+          description: '"full": the plot''s stored coordinates. "sector": the sector''s
+            reference point.'
+          readOnly: true
         created_at:
           type: string
           format: date-time
           readOnly: true
       required:
       - area_hectares
+      - coordinate_precision
       - created_at
       - farmer
       - id
@@ -983,10 +1008,16 @@ components:
           type: string
           format: decimal
           pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          description: Stored value for field agents and auditors. For exporter partners,
+            the sector's reference point (identical for every plot in the sector);
+            see coordinate_precision.
         longitude:
           type: string
           format: decimal
           pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          description: Stored value for field agents and auditors. For exporter partners,
+            the sector's reference point (identical for every plot in the sector);
+            see coordinate_precision.
         area_hectares:
           type: string
           format: decimal

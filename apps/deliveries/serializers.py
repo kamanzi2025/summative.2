@@ -5,6 +5,7 @@ from typing import Any
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.accounts.field_rules import CommercialTermField, PolicyFieldsMixin
 from apps.accounts.scoping import ScopedRelationsMixin
 from apps.pricing.services import get_active_price
 from apps.registry.models import Plot, WashingStation
@@ -12,8 +13,10 @@ from apps.registry.serializers import NameRelatedField
 
 from .models import MAX_DELIVERY_WEIGHT_KG, Delivery
 
+COMMERCIAL_HELP = "Commercial term: absent for compliance auditors."
 
-class DeliverySerializer(ScopedRelationsMixin, serializers.ModelSerializer):
+
+class DeliverySerializer(PolicyFieldsMixin, ScopedRelationsMixin, serializers.ModelSerializer):
     """Full delivery record, used to record a delivery and to read one back."""
 
     plot = serializers.PrimaryKeyRelatedField(queryset=Plot.objects.select_related("washing_station"))
@@ -26,6 +29,8 @@ class DeliverySerializer(ScopedRelationsMixin, serializers.ModelSerializer):
     farmer_name = serializers.CharField(source="plot.farmer.full_name", read_only=True)
     season = serializers.CharField(source="price_schedule.season", read_only=True)
     is_exportable = serializers.BooleanField(read_only=True)
+    unit_price_rwf = CommercialTermField(max_digits=10, decimal_places=2, help_text=COMMERCIAL_HELP)
+    amount_due_rwf = CommercialTermField(max_digits=12, decimal_places=2, help_text=COMMERCIAL_HELP)
 
     class Meta:
         model = Delivery
@@ -92,13 +97,14 @@ class DeliverySerializer(ScopedRelationsMixin, serializers.ModelSerializer):
         return attrs
 
 
-class DeliveryFeedSerializer(serializers.ModelSerializer):
+class DeliveryFeedSerializer(PolicyFieldsMixin, serializers.ModelSerializer):
     """Slim, flat row for the station feed: no nested objects, so pages stay small on 2G."""
 
     washing_station = serializers.CharField(source="washing_station.name", read_only=True)
     plot_code = serializers.CharField(source="plot.plot_code", read_only=True)
     farmer_name = serializers.CharField(source="plot.farmer.full_name", read_only=True)
     is_exportable = serializers.BooleanField(read_only=True)
+    amount_due_rwf = CommercialTermField(max_digits=12, decimal_places=2, help_text=COMMERCIAL_HELP)
 
     class Meta:
         model = Delivery

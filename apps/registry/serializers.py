@@ -2,10 +2,17 @@ import re
 from decimal import Decimal
 from typing import Any
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
-from apps.accounts.policies import scoped_station_id
+from apps.accounts.field_rules import (
+    CoordinateField,
+    NationalIdField,
+    PolicyFieldsMixin,
+    policy_from_context,
+)
+from apps.accounts.policies import CoordinatePrecision, scoped_station_id
 from apps.accounts.scoping import ScopedRelationsMixin
 
 from .models import (
@@ -24,6 +31,10 @@ from .services import register_farmer, register_plot
 from .validators import normalise_rwandan_phone
 
 _NATIONAL_ID = re.compile(r"^\d{16}$")
+COORDINATE_HELP = (
+    "Stored value for field agents and auditors. For exporter partners, the sector's reference point "
+    "(identical for every plot in the sector); see coordinate_precision."
+)
 
 
 class RwandanPhoneField(serializers.CharField):
@@ -67,12 +78,18 @@ class WashingStationSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "code", "sector"]
 
 
-class FarmerSerializer(ScopedRelationsMixin, serializers.ModelSerializer):
+class FarmerSerializer(PolicyFieldsMixin, ScopedRelationsMixin, serializers.ModelSerializer):
     phone = RwandanPhoneField(
         max_length=20,
         validators=[UniqueValidator(Farmer.objects.all(), message="A farmer with this phone number already exists.")],
     )
-    national_id = serializers.CharField(max_length=16, required=False, allow_null=True, allow_blank=True)
+    national_id = NationalIdField(
+        max_length=16,
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        help_text="16 digits. Read back as its last 4 digits for field agents; absent for other roles.",
+    )
     home_station = NameRelatedField(queryset=WashingStation.objects.all(), required=False, allow_null=True)
 
     class Meta:
@@ -117,11 +134,14 @@ class FarmerSerializer(ScopedRelationsMixin, serializers.ModelSerializer):
         return register_farmer(validated_data)
 
 
-class PlotSerializer(ScopedRelationsMixin, serializers.ModelSerializer):
+class PlotSerializer(PolicyFieldsMixin, ScopedRelationsMixin, serializers.ModelSerializer):
     sector = NameRelatedField(queryset=Sector.objects.all())
     washing_station = NameRelatedField(queryset=WashingStation.objects.all())
-    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, coerce_to_string=True)
-    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, coerce_to_string=True)
+    latitude = CoordinateField(axis="latitude", help_text=COORDINATE_HELP)
+    longitude = CoordinateField(axis="longitude", help_text=COORDINATE_HELP)
+    coordinate_precision = serializers.SerializerMethodField(
+        help_text='"full": the plot\'s stored coordinates. "sector": the sector\'s reference point.'
+    )
     area_hectares = serializers.DecimalField(
         max_digits=8,
         decimal_places=4,
@@ -145,6 +165,7 @@ class PlotSerializer(ScopedRelationsMixin, serializers.ModelSerializer):
             "risk_status",
             "risk_checked_at",
             "requires_manual_review",
+            "coordinate_precision",
             "created_at",
         ]
         read_only_fields = ["id", "risk_status", "risk_checked_at", "created_at"]
@@ -160,6 +181,10 @@ class PlotSerializer(ScopedRelationsMixin, serializers.ModelSerializer):
                 f"Longitude must be inside Rwanda ({RWANDA_LON_MIN} to {RWANDA_LON_MAX})."
             )
         return value
+
+    @extend_schema_field(serializers.ChoiceField(choices=[p.value for p in CoordinatePrecision]))
+    def get_coordinate_precision(self, plot: Plot) -> str:
+        return policy_from_context(self.context).coordinates.value
 
     def create(self, validated_data: dict[str, Any]) -> Plot:
         return register_plot(validated_data)
