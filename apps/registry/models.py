@@ -3,8 +3,10 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
+
+from apps.accounts.scoping import StationScopedQuerySet
 
 # Rwanda's bounding box, padded. Coordinates outside it are typos, not plots. It is a coarse check:
 # the southern edge sits below the real border (~-2.84) so the F2 fixture plot M2 (-2.90) fits.
@@ -27,16 +29,31 @@ class Sector(models.Model):
         return f"{self.name} ({self.district})"
 
 
+class WashingStationQuerySet(StationScopedQuerySet):
+    def own_station_q(self, station_id: int) -> Q:
+        return Q(pk=station_id)
+
+
 class WashingStation(models.Model):
     name = models.CharField(max_length=80, unique=True)
     code = models.CharField(max_length=16, unique=True)
     sector = models.ForeignKey(Sector, on_delete=models.PROTECT, related_name="washing_stations")
+
+    objects = WashingStationQuerySet.as_manager()
 
     class Meta:
         ordering = ["name"]
 
     def __str__(self) -> str:
         return self.name
+
+
+class FarmerQuerySet(StationScopedQuerySet):
+    def own_station_q(self, station_id: int) -> Q:
+        # A station's farmers: anyone with a plot delivering there, plus farmers registered there
+        # who have no plot yet. Exists() rather than a join, so a farmer with two plots is one row.
+        has_plot_here = Exists(Plot.objects.filter(farmer=OuterRef("pk"), washing_station_id=station_id))
+        return has_plot_here | Q(home_station_id=station_id)
 
 
 class Farmer(models.Model):
@@ -50,6 +67,8 @@ class Farmer(models.Model):
         WashingStation, on_delete=models.PROTECT, null=True, blank=True, related_name="farmers"
     )
     created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    objects = FarmerQuerySet.as_manager()
 
     class Meta:
         ordering = ["-created_at", "-id"]
@@ -70,6 +89,11 @@ class RiskStatus(models.TextChoices):
     UNVERIFIED = "unverified", "Unverified"
 
 
+class PlotQuerySet(StationScopedQuerySet):
+    def own_station_q(self, station_id: int) -> Q:
+        return Q(washing_station_id=station_id)
+
+
 class Plot(models.Model):
     farmer = models.ForeignKey(Farmer, on_delete=models.PROTECT, related_name="plots")
     plot_code = models.CharField(max_length=32, unique=True)
@@ -83,6 +107,8 @@ class Plot(models.Model):
     risk_status = models.CharField(max_length=12, choices=RiskStatus.choices, default=RiskStatus.PENDING)
     risk_checked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    objects = PlotQuerySet.as_manager()
 
     class Meta:
         ordering = ["-created_at", "-id"]

@@ -5,6 +5,7 @@ import pytest
 from django.utils import timezone
 
 from apps.deliveries.models import Delivery
+from apps.deliveries.serializers import DeliverySerializer
 from apps.pricing.models import PriceEntry, PriceSchedule
 from apps.registry.models import Plot, RiskStatus
 
@@ -56,11 +57,13 @@ def test_idempotent_replay_returns_original(agent_api, delivery_payload):
     assert Delivery.objects.count() == 1
 
 
-def test_same_client_reference_at_another_station_is_a_new_delivery(agent_api, delivery_payload, make_plot, kamonyi):
+def test_same_client_reference_at_another_station_is_a_new_delivery(
+    agent_api, kamonyi_agent_api, delivery_payload, make_plot, kamonyi
+):
     delivery_payload["client_reference"] = "shared-ref"
     assert agent_api.post("/api/deliveries/", delivery_payload, format="json").status_code == 201
     other = {**delivery_payload, "plot": make_plot(washing_station=kamonyi).pk, "washing_station": "Kamonyi"}
-    assert agent_api.post("/api/deliveries/", other, format="json").status_code == 201
+    assert kamonyi_agent_api.post("/api/deliveries/", other, format="json").status_code == 201
 
 
 @pytest.mark.parametrize(
@@ -74,11 +77,20 @@ def test_weight_out_of_range_is_rejected(agent_api, delivery_payload, weight, me
     assert response.json()["error"]["details"]["weight_kg"][0].startswith(message)
 
 
-def test_station_must_match_plot_station(agent_api, delivery_payload):
+def test_station_must_match_plot_station(delivery_payload):
+    # Through the API a field agent cannot even name another station (see test_access_scoping.py),
+    # so the plot/station rule is checked on the serializer alone, without a scoping request.
+    delivery_payload["washing_station"] = "Kamonyi"
+    serializer = DeliverySerializer(data=delivery_payload)
+    assert not serializer.is_valid()
+    assert "delivers to Nyaruguru" in serializer.errors["washing_station"][0]
+
+
+def test_station_outside_the_agents_scope_is_rejected(agent_api, delivery_payload):
     delivery_payload["washing_station"] = "Kamonyi"
     response = agent_api.post("/api/deliveries/", delivery_payload, format="json")
     assert response.status_code == 400
-    assert "delivers to Nyaruguru" in response.json()["error"]["details"]["washing_station"][0]
+    assert "washing_station" in response.json()["error"]["details"]
 
 
 def test_future_delivery_date_is_rejected(agent_api, delivery_payload):

@@ -5,6 +5,7 @@ from typing import Any
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.accounts.scoping import ScopedRelationsMixin
 from apps.pricing.services import get_active_price
 from apps.registry.models import Plot, WashingStation
 from apps.registry.serializers import NameRelatedField
@@ -12,7 +13,7 @@ from apps.registry.serializers import NameRelatedField
 from .models import MAX_DELIVERY_WEIGHT_KG, Delivery
 
 
-class DeliverySerializer(serializers.ModelSerializer):
+class DeliverySerializer(ScopedRelationsMixin, serializers.ModelSerializer):
     """Full delivery record, used to record a delivery and to read one back."""
 
     plot = serializers.PrimaryKeyRelatedField(queryset=Plot.objects.select_related("washing_station"))

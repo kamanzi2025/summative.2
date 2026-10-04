@@ -11,24 +11,29 @@ from django.db.models import QuerySet
 from apps.pricing.models import PriceEntry
 from apps.registry.models import Plot, WashingStation
 
-from .models import Delivery
+from .models import Delivery, DeliveryQuerySet
 
 logger = logging.getLogger(__name__)
 
 CENT = Decimal("0.01")
 
 
-def feed_queryset() -> QuerySet[Delivery]:
+def feed_queryset() -> DeliveryQuerySet:
     # One JOINed query per page: the feed serializer reads plot, farmer and station names.
     return Delivery.objects.select_related("plot__farmer", "washing_station").order_by("-recorded_at", "-id")
 
 
-def find_replay(washing_station: Any, client_reference: Any) -> Delivery | None:
-    """Return the delivery a phone already recorded under this idempotency key, if any."""
+def find_replay(
+    washing_station: Any, client_reference: Any, queryset: QuerySet[Delivery] | None = None
+) -> Delivery | None:
+    """Return the delivery a phone already recorded under this idempotency key, if any.
+
+    API callers pass the deliveries they may see, so another station's key is never replayed back.
+    """
     if not client_reference or not isinstance(client_reference, str) or not isinstance(washing_station, str):
         return None
     return (
-        feed_queryset()
+        (feed_queryset() if queryset is None else queryset)
         .filter(washing_station__name__iexact=washing_station.strip(), client_reference=client_reference.strip())
         .first()
     )

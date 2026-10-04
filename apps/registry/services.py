@@ -7,7 +7,7 @@ from typing import Any
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Exists, Max, OuterRef
+from django.db.models import Count, Exists, Max, OuterRef, QuerySet
 from django.utils import timezone
 
 from .clients import RiskAssessment
@@ -36,11 +36,13 @@ def _decimal(value: Any) -> Decimal | None:
         return None
 
 
-def find_farmer_replay(data: dict[str, Any]) -> Farmer | None:
+def find_farmer_replay(data: dict[str, Any], queryset: QuerySet[Farmer]) -> Farmer | None:
+    """`queryset` is what the caller may see: a key held by a farmer outside it is not a replay
+    (it falls through to validation, which reports the duplicate without returning the record)."""
     member_number = data.get("member_number")
     if not isinstance(member_number, str) or not member_number.strip():
         return None
-    return Farmer.objects.select_related("home_station").filter(member_number=member_number.strip()).first()
+    return queryset.select_related("home_station").filter(member_number=member_number.strip()).first()
 
 
 def farmer_replay_mismatches(farmer: Farmer, data: dict[str, Any]) -> list[str]:
@@ -57,11 +59,12 @@ def farmer_replay_mismatches(farmer: Farmer, data: dict[str, Any]) -> list[str]:
     return mismatched
 
 
-def find_plot_replay(data: dict[str, Any]) -> Plot | None:
+def find_plot_replay(data: dict[str, Any], queryset: QuerySet[Plot]) -> Plot | None:
+    """`queryset` is what the caller may see; see find_farmer_replay."""
     plot_code = data.get("plot_code")
     if not isinstance(plot_code, str) or not plot_code.strip():
         return None
-    return Plot.objects.select_related("sector", "washing_station").filter(plot_code=plot_code.strip()).first()
+    return queryset.select_related("sector", "washing_station").filter(plot_code=plot_code.strip()).first()
 
 
 def plot_replay_mismatches(plot: Plot, data: dict[str, Any]) -> list[str]:

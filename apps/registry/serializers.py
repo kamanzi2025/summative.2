@@ -5,6 +5,9 @@ from typing import Any
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
+from apps.accounts.policies import scoped_station_id
+from apps.accounts.scoping import ScopedRelationsMixin
+
 from .models import (
     MAX_PLOT_AREA_HECTARES,
     RWANDA_LAT_MAX,
@@ -64,7 +67,7 @@ class WashingStationSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "code", "sector"]
 
 
-class FarmerSerializer(serializers.ModelSerializer):
+class FarmerSerializer(ScopedRelationsMixin, serializers.ModelSerializer):
     phone = RwandanPhoneField(
         max_length=20,
         validators=[UniqueValidator(Farmer.objects.all(), message="A farmer with this phone number already exists.")],
@@ -101,11 +104,20 @@ class FarmerSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("A farmer with this national ID already exists.")
         return value
 
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        # A field agent's new farmer belongs to their station, so it stays visible to them (and to
+        # an idempotent resend) before it has a plot. Another station is rejected by the scoped field.
+        request = self.context.get("request")
+        station_id = scoped_station_id(request.user) if request else None
+        if station_id is not None and attrs.get("home_station") is None:
+            attrs["home_station"] = WashingStation.objects.get(pk=station_id)
+        return attrs
+
     def create(self, validated_data: dict[str, Any]) -> Farmer:
         return register_farmer(validated_data)
 
 
-class PlotSerializer(serializers.ModelSerializer):
+class PlotSerializer(ScopedRelationsMixin, serializers.ModelSerializer):
     sector = NameRelatedField(queryset=Sector.objects.all())
     washing_station = NameRelatedField(queryset=WashingStation.objects.all())
     latitude = serializers.DecimalField(max_digits=9, decimal_places=6, coerce_to_string=True)

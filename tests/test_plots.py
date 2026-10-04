@@ -42,14 +42,15 @@ def test_broker_outage_does_not_fail_registration(agent_api, plot_payload, djang
     assert Plot.objects.get().risk_status == RiskStatus.PENDING
 
 
-def test_list_plots_filters(agent_api, make_plot, make_farmer, kamonyi):
+def test_list_plots_filters(auditor_api, make_plot, make_farmer, kamonyi):
+    """Filters across both stations, so this reads as the auditor (who sees every station)."""
     owner = make_farmer()
     mine = make_plot(farmer=owner, risk_status=RiskStatus.CLEAR)
     make_plot(risk_status=RiskStatus.PENDING)
     other_station = make_plot(washing_station=kamonyi)
 
     def ids(query: str) -> list[int]:
-        return [row["id"] for row in agent_api.get(f"/api/plots/?{query}").json()["results"]]
+        return [row["id"] for row in auditor_api.get(f"/api/plots/?{query}").json()["results"]]
 
     assert ids(f"farmer={owner.pk}") == [mine.pk]
     assert ids("risk_status=clear") == [mine.pk]

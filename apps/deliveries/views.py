@@ -8,6 +8,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.serializers import BaseSerializer
 
+from apps.accounts.policies import Resource
 from apps.core.idempotency import NaturalKeyReplayMixin
 from apps.core.pagination import DeliveryFeedPagination
 from apps.registry.models import WashingStation
@@ -30,15 +31,16 @@ class DeliveryViewSet(
     pagination_class = DeliveryFeedPagination
     filterset_class = DeliveryFeedFilter
     natural_key_field = "client_reference"
+    policy_resource = Resource.DELIVERIES
 
     def get_queryset(self) -> QuerySet[Delivery]:
-        return services.feed_queryset()
+        return services.feed_queryset().visible_to(self.request.user)
 
     def get_serializer_class(self) -> type[BaseSerializer]:
         return DeliveryFeedSerializer if self.action == "list" else DeliverySerializer
 
     def find_replay(self, data: dict[str, Any]) -> Delivery | None:
-        return services.find_replay(data.get("washing_station"), data.get("client_reference"))
+        return services.find_replay(data.get("washing_station"), data.get("client_reference"), self.get_queryset())
 
     def replay_mismatches(self, existing: Delivery, data: dict[str, Any]) -> list[str]:  # type: ignore[override]
         return services.replay_mismatches(existing, data)
@@ -67,9 +69,12 @@ class StationDeliveryFeedView(generics.ListAPIView):
     serializer_class = DeliveryFeedSerializer
     pagination_class = DeliveryFeedPagination
     filterset_class = DeliveryFeedFilter
+    policy_resource = Resource.DELIVERIES
 
     def get_queryset(self) -> QuerySet[Delivery]:
         if getattr(self, "swagger_fake_view", False):  # schema generation has no URL kwargs
             return Delivery.objects.none()
-        station = get_object_or_404(WashingStation, pk=self.kwargs["station_id"])
-        return services.feed_queryset().filter(washing_station=station)
+        user = self.request.user
+        # Another station's feed is a 404 for a field agent, exactly like a station that does not exist.
+        station = get_object_or_404(WashingStation.objects.visible_to(user), pk=self.kwargs["station_id"])
+        return services.feed_queryset().visible_to(user).filter(washing_station=station)

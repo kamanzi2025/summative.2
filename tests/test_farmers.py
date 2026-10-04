@@ -13,8 +13,8 @@ def test_create_farmer_normalises_local_phone(agent_api, farmer_payload):
     assert Farmer.objects.get().phone == "+250780000000"
 
 
-def test_list_and_retrieve_farmer(agent_api, make_farmer):
-    farmer = make_farmer(full_name="Mukamana Claudine")
+def test_list_and_retrieve_farmer(agent_api, make_farmer, nyaruguru):
+    farmer = make_farmer(full_name="Mukamana Claudine", home_station=nyaruguru)
     listing = agent_api.get("/api/farmers/").json()
     assert [row["id"] for row in listing["results"]] == [farmer.pk]
     assert agent_api.get(f"/api/farmers/{farmer.pk}/").json()["full_name"] == "Mukamana Claudine"
@@ -61,8 +61,8 @@ def test_identical_resend_replays_existing_farmer(agent_api, farmer_payload):
     assert Farmer.objects.count() == 1
 
 
-def test_member_number_reused_with_different_details_is_a_conflict(agent_api, farmer_payload, make_farmer):
-    existing = make_farmer(member_number="KWA-F-0417")
+def test_member_number_reused_with_different_details_is_a_conflict(agent_api, farmer_payload, make_farmer, nyaruguru):
+    existing = make_farmer(member_number="KWA-F-0417", home_station=nyaruguru)
     response = agent_api.post("/api/farmers/", farmer_payload, format="json")
     assert response.status_code == 409
     error = response.json()["error"]

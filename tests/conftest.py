@@ -57,6 +57,11 @@ def agent_api(make_staff_user: Callable[..., User]) -> APIClient:
 
 
 @pytest.fixture
+def kamonyi_agent_api(make_staff_user: Callable[..., User], kamonyi: WashingStation) -> APIClient:
+    return _client_for(make_staff_user(Role.FIELD_AGENT, station=kamonyi, username="kamonyi_agent"))
+
+
+@pytest.fixture
 def exporter_api(make_staff_user: Callable[..., User]) -> APIClient:
     return _client_for(make_staff_user(Role.EXPORTER_PARTNER))
 
@@ -134,9 +139,10 @@ def farmer_payload() -> dict[str, Any]:
 
 
 @pytest.fixture
-def plot_payload(make_farmer: Callable[..., Farmer]) -> dict[str, Any]:
+def plot_payload(make_farmer: Callable[..., Farmer], nyaruguru: WashingStation) -> dict[str, Any]:
     return {
-        "farmer": make_farmer().pk,
+        # Registered at Nyaruguru, so the default field agent may give this farmer a plot.
+        "farmer": make_farmer(home_station=nyaruguru).pk,
         "plot_code": "KWA-P-0417-A",
         "sector": "Kigoma",
         "washing_station": "Nyaruguru",

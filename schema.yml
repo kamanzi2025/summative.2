@@ -181,8 +181,10 @@ paths:
   /api/farmers/:
     get:
       operationId: farmers_list
-      description: Registering the same member_number again with identical details
-        replays (200).
+      description: |-
+        Registering the same member_number again with identical details replays (200).
+
+        Field agents see their station's farmers: anyone with a plot there, or registered there.
       parameters:
       - name: cursor
         required: false
@@ -210,8 +212,10 @@ paths:
           description: ''
     post:
       operationId: farmers_create
-      description: Registering the same member_number again with identical details
-        replays (200).
+      description: |-
+        Registering the same member_number again with identical details replays (200).
+
+        Field agents see their station's farmers: anyone with a plot there, or registered there.
       tags:
       - farmers
       requestBody:
@@ -241,8 +245,10 @@ paths:
   /api/farmers/{id}/:
     get:
       operationId: farmers_retrieve
-      description: Registering the same member_number again with identical details
-        replays (200).
+      description: |-
+        Registering the same member_number again with identical details replays (200).
+
+        Field agents see their station's farmers: anyone with a plot there, or registered there.
       parameters:
       - in: path
         name: id
@@ -385,8 +391,9 @@ paths:
   /api/plots/{id}/risk-checks/:
     get:
       operationId: plots_risk_checks_list
-      description: 'Every registry call made for this plot, oldest first: evidence
-        of retries.'
+      description: |-
+        Every registry call made for this plot, oldest first: evidence of retries.
+        get_object() starts from the scoped queryset, so another station's plot is a 404.
       parameters:
       - in: path
         name: id
@@ -766,6 +773,10 @@ components:
       - weight_kg
     Farmer:
       type: object
+      description: |-
+        For serializers: every related field whose queryset supports visible_to() is narrowed to
+        the requesting user, so a write can only point at records they may see. An out-of-scope id or
+        name fails validation as "does not exist", the same as one that really does not exist.
       properties:
         id:
           type: integer
@@ -801,6 +812,10 @@ components:
       - phone
     FarmerRequest:
       type: object
+      description: |-
+        For serializers: every related field whose queryset supports visible_to() is narrowed to
+        the requesting user, so a write can only point at records they may see. An out-of-scope id or
+        name fails validation as "does not exist", the same as one that really does not exist.
       properties:
         full_name:
           type: string
@@ -898,6 +913,10 @@ components:
             $ref: '#/components/schemas/Plot'
     Plot:
       type: object
+      description: |-
+        For serializers: every related field whose queryset supports visible_to() is narrowed to
+        the requesting user, so a write can only point at records they may see. An out-of-scope id or
+        name fails validation as "does not exist", the same as one that really does not exist.
       properties:
         id:
           type: integer
@@ -957,6 +976,10 @@ components:
       - washing_station
     PlotRequest:
       type: object
+      description: |-
+        For serializers: every related field whose queryset supports visible_to() is narrowed to
+        the requesting user, so a write can only point at records they may see. An out-of-scope id or
+        name fails validation as "does not exist", the same as one that really does not exist.
       properties:
         farmer:
           type: integer

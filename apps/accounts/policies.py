@@ -50,6 +50,8 @@ class NationalIdVisibility(StrEnum):
     HIDDEN = "hidden"
 
 
+AnyUser = AbstractBaseUser | AnonymousUser | None
+
 READ_ONLY = frozenset({Action.READ})
 READ_WRITE = frozenset({Action.READ, Action.WRITE})
 
@@ -114,7 +116,7 @@ ROLE_POLICIES: Mapping[str, RolePolicy] = MappingProxyType(
 )
 
 
-def profile_for(user: AbstractBaseUser | AnonymousUser | None) -> UserProfile | None:
+def profile_for(user: AnyUser) -> UserProfile | None:
     """The user's profile, or None when they must be treated as having no role."""
     if user is None or not user.is_authenticated or not user.is_active:
         return None
@@ -127,12 +129,21 @@ def profile_for(user: AbstractBaseUser | AnonymousUser | None) -> UserProfile | 
     return profile
 
 
-def policy_for(user: AbstractBaseUser | AnonymousUser | None) -> RolePolicy | None:
+def policy_for(user: AnyUser) -> RolePolicy | None:
     """The user's policy, or None (deny everything)."""
     profile = profile_for(user)
     return ROLE_POLICIES.get(profile.role) if profile else None
 
 
-def can(user: AbstractBaseUser | AnonymousUser | None, resource: Resource, action: Action) -> bool:
+def can(user: AnyUser, resource: Resource, action: Action) -> bool:
     policy = policy_for(user)
     return policy is not None and policy.allows(resource, action)
+
+
+def scoped_station_id(user: AnyUser) -> int | None:
+    """The station a station-scoped user is bound to; None for everyone else."""
+    policy = policy_for(user)
+    if policy is None or policy.record_scope != RecordScope.OWN_STATION:
+        return None
+    profile = profile_for(user)
+    return profile.washing_station_id if profile else None

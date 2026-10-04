@@ -105,8 +105,12 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
-    # Closed by default: a view is public only if it says so (status, price schedule, login).
-    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    # Closed by default: a view is public only if it says so (status, price schedule, login), and
+    # every other view must name the ROLE_POLICIES resource it serves (apps/accounts/permissions.py).
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+        "apps.accounts.permissions.RolePolicyPermission",
+    ],
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.CreatedAtCursorPagination",
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",

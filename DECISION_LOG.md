@@ -252,3 +252,91 @@ error and changes nothing.
   cannot reach a production database by accident.
 - A merge tool for the rare case where the national ID and the member number belong to two
   different farmers.
+
+## Enforcing the role policies: a permission check plus record scoping
+
+### Decision
+
+`ROLE_POLICIES` is now enforced on every endpoint in two layers.
+
+1. **Permission: may this role call this endpoint at all?** `RolePolicyPermission` is in
+   `DEFAULT_PERMISSION_CLASSES`. Each view names the resource it serves (`policy_resource`).
+   Reading (`GET`, `HEAD`, `OPTIONS`) needs `read` on that resource; anything else needs `write`.
+   - A user with no role gets `403` everywhere, and so does any view that forgets to name its
+     resource.
+   - Exporter partners and compliance auditors are read-only, so every write they attempt is a
+     `403`.
+   - Anonymous callers still get `401`.
+2. **Scope: which records may this user see?** Every list, detail route and sub-route builds its
+   query with `Model.objects.visible_to(user)`. Exporters and auditors see every station. A field
+   agent sees only their own station:
+   - **Deliveries and plots:** those whose `washing_station` is the agent's station.
+   - **Washing stations:** only the agent's own.
+   - **Farmers:** anyone with a plot at the agent's station (an `Exists()` subquery), **or**
+     anyone whose `home_station` is the agent's station. When a field agent registers a farmer,
+     `home_station` defaults to the agent's station, and naming another station is rejected.
+
+   The same scope applies to:
+   - the sub-routes: `/api/plots/{id}/risk-checks/`, `/api/stations/{id}/` and
+     `/api/stations/{id}/deliveries/`
+   - the idempotent-replay lookups, which search only among records the caller can see
+   - the related fields in write requests: the `farmer` and `washing_station` of a new plot, and
+     the `plot` and `washing_station` of a new delivery. A field agent cannot create a record
+     pointing at another station's data.
+
+A record outside the caller's scope returns `404`, the same as a record that does not exist. It
+never returns `403`.
+
+### Risk Addressed
+
+- **A field agent reading another station's records** by guessing IDs, adding
+  `?washing_station=Kamonyi` to a list, or using a sub-route. Every one of these starts from the
+  same scoped query, so there is no unscoped path to forget.
+- **Leaks through idempotent replay.** Before this change, re-sending another station's
+  `client_reference` or `plot_code` would have returned that station's record (200). Re-sending
+  their `member_number` would have returned a 409 containing the farmer's ID. Now the lookup
+  cannot see those records, so the request falls through to normal validation, which reports a
+  plain duplicate error and returns no data.
+- **Gaining access by writing.** Without scoped related fields, an agent could attach a plot to
+  another station's farmer. That farmer would then become visible through the new plot, exposing
+  their details. Scoped fields reject the request.
+- **Confirming that a record exists.** A `403` on `/api/plots/57/` would tell an agent that plot
+  57 exists elsewhere. A `404` tells them nothing.
+
+### Alternatives Considered
+
+- **Farmers visible only through a plot at the agent's station** (the original rule). This broke
+  three things for a newly registered farmer: the agent could not give them a first plot without
+  also being able to attach plots to any station's farmers; a 2G resend of the registration got a
+  `400` instead of the idempotent `200`; and the farmer was missing from the agent's list.
+  Adding `home_station` fixes all three while keeping the scope to the agent's station.
+- **Filtering in each view by hand** (`if role == ...`). Each new view or sub-route is another
+  place to forget, and replay lookups are easy to miss. A single `visible_to()` on the model's
+  queryset is shared by views, sub-routes, replays and serializer fields.
+- **Object-level checks (`has_object_permission`) returning `403`.** These run only on detail
+  routes, not on lists or replay lookups, and the `403` confirms that the record exists.
+- **django-guardian or another per-object permission library.** It stores a permission row for
+  every record and user. Our rule ("same station") is a single filter, so per-row grants would
+  add storage and keeping them in sync, with no benefit.
+
+### Trade-off
+
+- A field agent cannot record anything for another station, even to help out during harvest. A
+  move between stations means changing the agent's profile.
+- A farmer registered at one station who later delivers only to another stays visible to the
+  first station's agents through `home_station`. This is a small widening of scope, accepted to
+  keep registration working.
+- A uniqueness error still reveals that a member number, plot code or national ID is already in
+  use somewhere, though not who uses it or any of their data. Keeping data unique across the
+  network depends on this.
+- The farmer scope adds an `Exists()` subquery to every field agent farmer query. It still runs as
+  one query per page; there is no index on `(farmer, washing_station)` yet.
+- Code that runs outside a request (the seed command, Celery tasks, serializers used without a
+  request) is not scoped. Scoping applies only to API requests.
+
+### Deferred Work
+
+- An index on `Plot(farmer, washing_station)` if the farmer subquery shows up in query plans.
+- Field-level rules on top of record scope (step 7): masking national IDs, coarsening coordinates
+  for exporters, and removing commercial terms for auditors.
+- Field agents covering more than one station.

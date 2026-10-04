@@ -2,11 +2,17 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.accounts.scoping import StationScopedQuerySet
 from apps.pricing.models import Grade, PriceSchedule
 from apps.registry.models import Plot, RiskStatus, WashingStation
 
 # Upper bound for one farmer's delivery at the scale; larger values are data-entry errors.
 MAX_DELIVERY_WEIGHT_KG = 500
+
+
+class DeliveryQuerySet(StationScopedQuerySet):
+    def own_station_q(self, station_id: int) -> Q:
+        return Q(washing_station_id=station_id)
 
 
 class Delivery(models.Model):
@@ -31,6 +37,8 @@ class Delivery(models.Model):
     amount_due_rwf = models.DecimalField(max_digits=12, decimal_places=2)
     plot_risk_status_at_delivery = models.CharField(max_length=12, choices=RiskStatus.choices)
     recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    objects = DeliveryQuerySet.as_manager()
 
     class Meta:
         ordering = ["-recorded_at", "-id"]
