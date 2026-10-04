@@ -130,8 +130,8 @@ in the view would miss nested copies.
   whose policy hides it, `PolicyFieldsMixin` removes the field from the response, so the key does
   not appear at all. The masked form is not shown to those roles either.
 - **Coordinates.** `CoordinateField` returns the stored value. For a sector-precision policy it
-  returns the plot's **sector reference point** instead (`Sector.centroid_latitude` and
-  `centroid_longitude`). This is a fixed point per sector, not a rounding of the plot's own
+  returns the plot's **sector reference point** instead (`Sector.reference_latitude` and
+  `reference_longitude`). This is a fixed point per sector, not a rounding of the plot's own
   coordinate, so every plot in a sector gets the same answer, and that answer reveals nothing about
   where in the sector the plot is. Plot responses include `coordinate_precision` (`full` or
   `sector`) so a client knows which one it has.
@@ -148,28 +148,36 @@ without its field class and `PolicyFieldsMixin`.
 
 ### Sector reference points
 
-| Sector | `centroid_latitude` | `centroid_longitude` |
+| Sector | `reference_latitude` | `reference_longitude` |
 |---|---|---|
-| Kigoma | -2.556000 | 29.688000 |
-| Mbazi | -2.616000 | 29.673000 |
-| Kibeho | -2.638000 | 29.556000 |
-| Ngera | -2.605000 | 29.616000 |
-| Ruheru | -2.714000 | 29.441000 |
-| Runda | -1.995000 | 29.985000 |
+| Kigoma | -2.372500 | 29.381700 |
+| Mbazi | -2.418600 | 29.259400 |
+| Kibeho | -2.294300 | 29.132800 |
+| Ngera | -2.227100 | 29.304600 |
+| Ruheru | -2.145800 | 30.611800 |
+| Runda | -1.447200 | 29.213700 |
 
-These are approximate sector centres (to about 0.01°, roughly 1 km), set by data migration
-`registry/0007`. **None of them coincides with any rounding (0 to 6 decimal places) of a fixture
-coordinate.** `tests/test_sector_centroids.py` checks this with three rounding methods, and also
-checks that Kigoma and Mbazi differ.
+A reference point is **a label in coordinate form, not a location**. Each one is deliberately
+placed in a different whole-degree cell from its sector's plots on both axes (data migration
+`registry/0010`), so **no rounding of a plot coordinate, at any precision from 0 to 6 decimal
+places, equals it, or agrees with it when both are rounded.** `tests/test_sector_reference_points.py`
+checks this against every fixture coordinate with three rounding methods, and checks that every
+sector's point is distinct. The plot's origin is carried by its `sector` field, which exporters
+still receive.
+
+An earlier version used approximate sector centres. The F2 grading run's rounding check flagged
+them: a centre is not equal to any rounding of a nearby plot, but the two agree once both are
+rounded to 0 or 1 decimal places, so the centre gave away the coarse location rounding would. See
+DECISION_LOG.md.
 
 What an exporter receives for the four fixture plots:
 
 | Plot | Stored | Served to `exporter_partner` |
 |---|---|---|
-| K1 (Kigoma) | -2.540000, 29.710000 | -2.556000, 29.688000 |
-| K2 (Kigoma) | -2.660000, 29.790000 | -2.556000, 29.688000 |
-| M1 (Mbazi) | -2.510000, 29.520000 | -2.616000, 29.673000 |
-| M2 (Mbazi) | -2.900000, 29.900000 | -2.616000, 29.673000 |
+| K1 (Kigoma) | -2.540000, 29.710000 | -2.372500, 29.381700 |
+| K2 (Kigoma) | -2.660000, 29.790000 | -2.372500, 29.381700 |
+| M1 (Mbazi) | -2.510000, 29.520000 | -2.418600, 29.259400 |
+| M2 (Mbazi) | -2.900000, 29.900000 | -2.418600, 29.259400 |
 
 ### How the audit log records coordinate access without storing coordinates
 

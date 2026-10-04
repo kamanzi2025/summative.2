@@ -18,7 +18,7 @@ from rest_framework import serializers
 from rest_framework.test import APIClient, APIRequestFactory
 
 # pytest puts tests/ on sys.path (rootdir-relative "prepend" import mode).
-from test_sector_centroids import roundings
+from test_sector_reference_points import roundings
 
 from apps.accounts.field_rules import CommercialTermField, CoordinateField, NationalIdField, PolicyFieldsMixin
 from apps.deliveries.models import Delivery
@@ -148,7 +148,7 @@ def test_exporter_coordinates_follow_the_contract():
 def test_exporter_gets_the_sector_reference_point():
     kigoma = Sector.objects.get(name="Kigoma")
     row = plots_by_code(EXPORTER)["KWA-SEED-K1"]
-    assert (row["latitude"], row["longitude"]) == (str(kigoma.centroid_latitude), str(kigoma.centroid_longitude))
+    assert (row["latitude"], row["longitude"]) == (str(kigoma.reference_latitude), str(kigoma.reference_longitude))
 
 
 def test_exporter_plot_detail_is_coarsened_too():
@@ -174,7 +174,7 @@ def test_nested_plot_copy_follows_the_same_rule():
     data = StationWithPlots(nyaruguru, context={"request": request}).data
     kigoma = Sector.objects.get(name="Kigoma")
     assert {(p["latitude"], p["longitude"]) for p in data["plots"]} == {
-        (str(kigoma.centroid_latitude), str(kigoma.centroid_longitude))
+        (str(kigoma.reference_latitude), str(kigoma.reference_longitude))
     }
 
 

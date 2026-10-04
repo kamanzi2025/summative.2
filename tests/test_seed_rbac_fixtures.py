@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from django.contrib.auth.models import User
 from django.core.management import CommandError, call_command
+from rest_framework.test import APIClient
 
 from apps.accounts.models import Role, UserProfile
 from apps.deliveries.models import Delivery
@@ -99,13 +100,47 @@ def test_queues_no_risk_check(django_capture_on_commit_callbacks):
     delay.assert_not_called()
 
 
-def test_reuses_the_farmer_registered_by_the_f1_flow(farmer_payload, make_farmer):
-    """The F1 contract flow registers the same national ID under KWA-F-0417."""
+def test_leaves_the_f1_flows_farmer_alone(farmer_payload, make_farmer):
+    """The F1 contract flow registers the same person and national ID under KWA-F-0417. The seed
+    farmer is a separate membership (KWA-F-SEED-01), so the F1 record is not touched."""
     f1_farmer = make_farmer(**{k: v for k, v in farmer_payload.items() if k != "cooperative"})
     seed()
-    assert Farmer.objects.filter(national_id=NATIONAL_ID).count() == 1
-    farmer = Farmer.objects.get(pk=f1_farmer.pk)
-    assert (farmer.member_number, farmer.phone) == ("KWA-F-SEED-01", "+250788999001")
+    seed()
+    assert Farmer.objects.filter(national_id=NATIONAL_ID).count() == 2
+    f1_farmer.refresh_from_db()
+    assert (f1_farmer.member_number, f1_farmer.phone) == ("KWA-F-0417", "+250780000000")
+
+
+def test_f1_contract_flow_still_works_after_seeding(farmer_payload):
+    """The F1 farmer, plot and delivery payloads, posted by the field agent after seeding."""
+    seed()
+    client = APIClient()
+    client.force_login(User.objects.get(username="field_agent_user"))
+    farmer = client.post("/api/farmers/", farmer_payload, format="json")
+    assert farmer.status_code == 201, farmer.json()
+    plot_body = {
+        "farmer": farmer.json()["id"],
+        "plot_code": "KWA-P-0417-A",
+        "sector": "Kigoma",
+        "washing_station": "Nyaruguru",
+        "latitude": "-2.540000",
+        "longitude": "29.710000",
+        "area_hectares": "0.42",
+    }
+    with patch("apps.registry.tasks.run_risk_check.delay"):
+        plot = client.post("/api/plots/", plot_body, format="json")
+    assert plot.status_code == 201, plot.json()
+    delivery_body = {
+        "plot": plot.json()["id"],
+        "washing_station": "Nyaruguru",
+        "weight_kg": "38.5",
+        "grade": "A",
+        "delivered_on": "2026-03-14",
+    }
+    delivery = client.post("/api/deliveries/", delivery_body, format="json")
+    assert delivery.status_code == 201, delivery.json()
+    # And an identical resend is still an idempotent replay.
+    assert client.post("/api/farmers/", farmer_payload, format="json").status_code == 200
 
 
 def test_resets_a_farmer_found_by_member_number(make_farmer):
@@ -136,19 +171,11 @@ def test_moves_a_plot_code_taken_by_another_farmer_onto_the_seed_farmer(make_plo
     assert stray.latitude == Decimal("-2.900000")
 
 
-def test_refuses_when_national_id_and_member_number_are_different_farmers(make_farmer):
-    make_farmer(national_id=NATIONAL_ID)
-    make_farmer(member_number="KWA-F-SEED-01")
-    with pytest.raises(CommandError, match="Resolve this by hand"):
-        seed()
-    assert not User.objects.exists(), "the whole run is rolled back"
-
-
 def test_refuses_when_the_seed_phone_belongs_to_someone_else(make_farmer):
     make_farmer(phone="+250788999001")
     with pytest.raises(CommandError, match="Seed phone"):
         seed()
-    assert not Plot.objects.exists()
+    assert not Plot.objects.exists() and not User.objects.exists(), "the whole run is rolled back"
 
 
 def test_seeded_users_can_obtain_a_token(anon_api):

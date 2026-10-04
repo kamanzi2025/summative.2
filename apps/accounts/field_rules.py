@@ -76,7 +76,7 @@ class CoordinateField(serializers.DecimalField):
 
     def get_attribute(self, instance: Any) -> Any:
         if policy_from_context(self.context).coordinates == CoordinatePrecision.SECTOR:
-            return getattr(instance.sector, f"centroid_{self.axis}")
+            return getattr(instance.sector, f"reference_{self.axis}")
         return super().get_attribute(instance)
 
 

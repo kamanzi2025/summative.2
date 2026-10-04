@@ -267,31 +267,37 @@ Running it again updates existing rows to the seed values instead of creating ne
 
 - **Users** are found by username. Each run resets the password, marks the user active, and
   resets the role and station.
-- **The farmer** is looked up by `national_id` first, then by `member_number`, and the record found
-  is updated to the seed values. The phone number, `+250788999001`, is not in the contract; I made
-  it up so it is unique.
+- **The farmer** is looked up by `member_number` (`KWA-F-SEED-01`), the farmer's natural key, and
+  updated to the seed values. The phone number, `+250788999001`, is not in the contract; I made it
+  up so it is unique.
 - **Plots** use `update_or_create` on `plot_code`.
 - **Deliveries** have fixed `client_reference` values (`seed-rbac-K1`, `seed-rbac-M1`). A delivery
   that already exists is left unchanged.
 
-The whole run is a single transaction. If the national ID and the member number point to two
-different farmers, or another farmer already has the seed phone number, the command stops with an
-error and changes nothing.
+The whole run is a single transaction. If another farmer already has the seed phone number, the
+command stops with an error and changes nothing.
+
+**Revised after the first F2 grading run.** The first version looked the farmer up by national ID
+first, because `national_id` was unique and the contract gives the seed farmer the same national ID
+as the F1 contract's farmer (`1198770123456789`). That made the F1 flow fail after seeding: posting
+the F1 farmer returned `400` ("a farmer with this national ID already exists"). Migration
+`registry/0009` dropped the uniqueness rule (keeping an index for lookups), and the seed now finds
+its farmer by member number, so the F1 farmer and the seed farmer are two memberships of the same
+person.
 
 ### Risk Addressed
 
-- **Duplicate national IDs.** The F1 contract flow registers the same person, Uwimana Béatrice,
-  with the same national ID but member number `KWA-F-0417`. `national_id` is unique, so creating a
-  second farmer would crash on any database where the F1 flow had already run. Looking the farmer
-  up by national ID first reuses that record.
+- **Breaking the F1 flow.** The F1 contract flow registers the same person, Uwimana Béatrice, with
+  the same national ID but member number `KWA-F-0417`. With national IDs unique, whichever record
+  came second failed. Keying on member number keeps both working, in either order.
 - **Grading against drifted data.** If a fixture user's password, role or station had been
   changed, a "create if missing" command would leave it wrong. Resetting the values on every run
   means the access-matrix checks always start from the contract's values.
 - **Unwanted background work.** Creating plots through `register_plot` would queue a risk check
   with the external registry for each seed plot. `update_or_create` writes the rows directly, so
   no Celery job is queued and the command works without Redis or a worker.
-- **Silent data damage.** When the command cannot tell which existing record is the real one, it
-  stops and asks for a person to resolve it, rather than guessing and overwriting someone's data.
+- **Silent data damage.** The seed never overwrites the F1 farmer (or any other member) just
+  because they share a national ID; it only touches the record with the seed member number.
 
 ### Who Benefits
 
@@ -300,8 +306,11 @@ three-role dataset with one command.
 
 ### Alternatives Considered
 
-- **Look up the farmer by member number only.** This is simpler, but it fails on the duplicate
-  national ID described above.
+- **Look up the farmer by national ID first and reuse the F1 farmer** (the first version). It
+  renamed the F1 farmer to the seed member number, and with unique national IDs the F1 flow could
+  no longer create its farmer after seeding, which failed the F1 regression check.
+- **Keep national IDs unique and give the seed farmer a different ID.** The contract fixes the
+  seed farmer's national ID, so this is not an option.
 - **Create through the HTTP API.** The contract asks for direct model writes. The API would also
   queue risk checks, and once the policies are enforced, it would need a logged-in role user just
   to create the fixtures.
@@ -312,9 +321,9 @@ three-role dataset with one command.
 
 - The command overwrites. If someone edits a seed user or the seed farmer by hand, the next run
   undoes the edit.
-- On a database where the F1 flow ran, the F1 farmer is renamed to `KWA-F-SEED-01` with the seed
-  phone. Re-posting the F1 farmer (`KWA-F-0417`) afterwards fails with a duplicate national ID,
-  because that person now exists under the seed member number.
+- National IDs are no longer unique, so the database no longer stops the same ID being typed onto
+  two different people by mistake. `member_number` (unique) is the identity the system relies on;
+  a duplicate-ID report for registrars is listed as deferred work.
 - Deliveries that already exist are not updated, so a seed delivery keeps the price it was first
   recorded at. This is deliberate: a delivery's price is a record of what the farmer was paid.
 - The seed plots start as `pending`. No check is queued at seed time, but the periodic sweeper will
@@ -328,8 +337,10 @@ three-role dataset with one command.
   cannot reach a production database by accident. Deferred because the grading environment's
   settings are unknown and the guard could block the hidden checks; there is no production
   deployment yet for it to protect.
-- A merge tool for the rare case where the national ID and the member number belong to two
-  different farmers.
+- A report of national IDs shared by more than one member, so a registrar can check whether each
+  is a genuine second membership or a typing mistake. Deferred because a shared ID is legitimate
+  (two cooperatives, two member numbers), so it cannot simply be rejected, and deciding which
+  cases are mistakes needs the cooperative's membership records, not the API.
 
 ## Enforcing the role policies: a permission check plus record scoping
 
@@ -411,7 +422,7 @@ never returns `403`.
 - A farmer registered at one station who later delivers only to another stays visible to the
   first station's agents through `home_station`. This is a small widening of scope, accepted to
   keep registration working.
-- A uniqueness error still reveals that a member number, plot code or national ID is already in
+- A uniqueness error still reveals that a member number, phone number or plot code is already in
   use somewhere, though not who uses it or any of their data. Keeping data unique across the
   network depends on this.
 - The farmer scope adds an `Exists()` subquery to every field agent farmer query. It still runs as
@@ -429,27 +440,36 @@ never returns `403`.
 
 ### Decision
 
-Each `Sector` stores a reference point (`centroid_latitude`, `centroid_longitude`). Exporter
+Each `Sector` stores a reference point (`reference_latitude`, `reference_longitude`). Exporter
 partners receive that point in place of a plot's own coordinates, on every plot response,
 including detail routes and any nested copy (served by `CoordinateField`, see the privacy entry).
 Field agents and compliance auditors receive full stored precision. Every plot response says which
 one it carries (`coordinate_precision`: `full` or `sector`), and the audit log records it for every
 request.
 
-Three migrations add the points:
+**A reference point is a label in coordinate form, not a location.** Each sector's point is
+deliberately placed in a *different whole-degree cell* from that sector's plots, on both axes. So
+no rounding of a plot coordinate, at any precision from 0 to 6 decimal places and by any rounding
+method, equals the point or even agrees with it when both are rounded. Where the coffee comes from
+is carried by the plot's `sector` field (for example `"Kigoma"`), which exporters still receive.
 
-1. `0006`: add both fields, allowing empty values.
-2. `0007`: fill in the six seeded sectors.
-3. `0008`: make both fields required and add a constraint keeping the point inside Rwanda's
-   bounding box (the same check plots get).
+| Sector | Reference point | Sector's plots lie around |
+|---|---|---|
+| Kigoma | -2.3725, 29.3817 | -2.5 to -2.7, 29.7 to 29.8 |
+| Mbazi | -2.4186, 29.2594 | -2.5 to -2.9, 29.5 to 29.9 |
 
-The fill step stops with a clear error if any sector is missing a point. The steps are separate
-migrations because on PostgreSQL, updating rows and then altering the same table within one
-transaction can fail.
+How the points got there:
 
-The points are **approximate sector centres**, accurate to roughly 0.01° (about 1 km). They are not
-surveyed centroids, and they are stored to 4 decimal places on purpose. Their only job is to be
-one shared point per sector.
+1. `0006`–`0008` added the fields (nullable, filled, then required with a Rwanda-bounds
+   constraint), in separate migrations because on PostgreSQL updating rows and then altering the
+   same table in one transaction can fail.
+2. `0007` first filled them with **approximate sector centres**.
+3. `0010` moved them and renamed the fields from `centroid_*` to `reference_*`. The F2 grading
+   run's rounding check flagged the centres: Kigoma's centre (`-2.556, 29.688`) is not equal to any
+   rounding of plot K1 (`-2.54, 29.71`), but rounding *both* to 0 decimal places gives `-3, 30` for
+   each, and at 1 place the longitudes agree (`29.7`). A centre shares the coarse location that
+   rounding would reveal, which is exactly what coarsening is meant to prevent. A point in another
+   cell shares nothing.
 
 ### Risk Addressed
 
@@ -462,10 +482,11 @@ one shared point per sector.
   fixtures are designed so that no single rounding precision passes. A reference point keyed to
   the sector gives every plot in the sector the same answer, and the answer reveals nothing about
   where inside the sector the plot is.
-- **A reference point that happens to equal a rounded coordinate.** That would leak the plot
-  location it matches. Tests check every reference point against every rounding (0 to 6 decimal
-  places, three rounding methods) of every fixture coordinate. They also check that the Kigoma
-  and Mbazi points differ, and confirm that rounding alone cannot meet the contract.
+- **A reference point that agrees with a rounded coordinate.** That would leak the coarse location
+  it matches. `tests/test_sector_reference_points.py` checks every reference point against every
+  fixture coordinate, rounding both to 0–6 decimal places by three methods, on each axis. It also
+  checks that every sector's point is distinct, and confirms that rounding alone cannot meet the
+  contract.
 
 ### Who Benefits
 
@@ -485,9 +506,10 @@ one shared point per sector.
   sector, same point" rule.
 - **Computing the centre of the sector's plots.** The point would move every time a plot is added,
   and with only one or two plots it would sit close to a real farm.
-- **Surveyed centroids from official boundary data** (NISR/RLMUA sector polygons). These would be
-  more accurate, but they need boundary data and a geometry library, and for this purpose an
-  approximate point does the same job.
+- **The sector's geographic centre** (the first version, from `0007`). It agrees with the plots'
+  coordinates once both are rounded to 0 or 1 decimal places, so it gives away the coarse location
+  rounding would, and it failed the F2 rounding check. Official boundary polygons would make the
+  centre more accurate, but no more private.
 - **No location at all for exporters.** This would fail the contract, and partners do need sector
   origin for traceability.
 
@@ -495,8 +517,9 @@ one shared point per sector.
 
 - An exporter cannot tell two plots in the same sector apart by location. This is the intended
   effect.
-- The points are approximate, so the location shown on an exporter's map is not the true centre of
-  the sector.
+- **An exporter's map is wrong on purpose.** Plotting the reference points puts every sector's
+  plots in a place outside the sector. A partner that needs a map must place the sector by its
+  name (`sector`). This is the cost of a coordinate that carries no location at all.
 - Every new sector needs a reference point before it can be saved. Adding a sector is now a data
   change that needs a short review.
 - A sector with very few plots still narrows the search: if a sector has one plot, the exporter
@@ -510,9 +533,10 @@ one shared point per sector.
   technical one: hiding small sectors could withhold traceability data a buyer is owed under the
   export regulation, and the threshold has to be agreed with them. With two pilot stations, every
   fixture sector has at least two plots.
-- **Replacing the approximate points with centroids from official sector boundary polygons**
-  (NISR/RLMUA). Deferred because accuracy does not affect the privacy guarantee (same sector,
-  same point, no rounding leak), while it adds a boundary dataset and a geometry dependency.
+- **A check, when a sector is added, that its reference point is in a different cell from its
+  plots.** Today the rule is enforced by tests over the fixture plots and by review of the data
+  migration. Deferred because sectors are added rarely, by migration, and the plots of a new
+  sector do not exist yet when its point is chosen.
 
 ## Privacy: field-level rules for national IDs, coordinates and commercial terms
 
@@ -601,8 +625,8 @@ on its own from `Meta.fields`.
   F2 contract requires that the field does not appear at all.
 - **Masking the national ID for exporters too** (last 4 digits). The contract forbids even the
   masked form for exporters and auditors, and they have no need for it.
-- **Masking in the database** (storing only the last 4 digits). Field agents and the registration
-  check for duplicate IDs still need the full value.
+- **Masking in the database** (storing only the last 4 digits). Field agents confirming a farmer's
+  identity, and any future report of IDs shared across memberships, still need the full value.
 
 ### Trade-off
 
@@ -830,10 +854,10 @@ claim). Implementable in four changes, none of them in views:
 
 1. Add `DISTRICT` to `CoordinatePrecision`.
 2. Give each district a reference point. Today `Sector.district` is a text field; promote it to a
-   `District` model with `centroid_latitude`/`centroid_longitude` and a data migration (the same
-   pattern as `registry/0006`–`0008`).
+   `District` model with `reference_latitude`/`reference_longitude` and a data migration (the same
+   pattern as `registry/0006`–`0010`).
 3. Add one branch to `CoordinateField.get_attribute`: for `DISTRICT`, return
-   `instance.sector.district.centroid_*`.
+   `instance.sector.district.reference_*`.
 4. Add the buyer's role to `ROLE_POLICIES` with `coordinates=CoordinatePrecision.DISTRICT`.
 
 Tests extend the existing ones: same district gives the same point, different districts give

@@ -82,16 +82,10 @@ class Command(BaseCommand):
         UserProfile.objects.update_or_create(user=user, defaults={"role": role, "washing_station": station})
 
     def seed_farmer(self) -> Farmer:
-        # national_id first: the F1 contract flow registers this same person (and national ID)
-        # under member_number KWA-F-0417, and national_id is unique, so creating would fail.
-        by_national_id = Farmer.objects.filter(national_id=FARMER["national_id"]).first()
-        by_member_number = Farmer.objects.filter(member_number=FARMER["member_number"]).first()
-        if by_national_id and by_member_number and by_national_id.pk != by_member_number.pk:
-            raise CommandError(
-                f"National ID {FARMER['national_id']} belongs to farmer {by_national_id.pk} but member number "
-                f"{FARMER['member_number']} belongs to farmer {by_member_number.pk}. Resolve this by hand."
-            )
-        farmer = by_national_id or by_member_number or Farmer()
+        # member_number is the farmer's natural key. The F1 contract flow registers the same
+        # person and national ID under KWA-F-0417; that record is left alone, so the F1 flow
+        # still creates and replays its own farmer after seeding.
+        farmer = Farmer.objects.filter(member_number=FARMER["member_number"]).first() or Farmer()
         phone_owner = Farmer.objects.filter(phone=FARMER["phone"]).exclude(pk=farmer.pk).first()
         if phone_owner:
             raise CommandError(f"Seed phone {FARMER['phone']} already belongs to farmer {phone_owner.pk}.")

@@ -22,18 +22,19 @@ class Sector(models.Model):
 
     name = models.CharField(max_length=80, unique=True)
     district = models.CharField(max_length=80)
-    # The sector's reference point: what exporters receive instead of a plot's own coordinates,
-    # so every plot in the sector reports the same location (see DECISION_LOG.md).
-    centroid_latitude = models.DecimalField(max_digits=9, decimal_places=6)
-    centroid_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    # The sector's reference point: what exporters receive instead of a plot's own coordinates, so
+    # every plot in the sector reports the same point. Deliberately not inside the sector: no
+    # rounding of a plot coordinate reaches it (migration 0010, DECISION_LOG.md).
+    reference_latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    reference_longitude = models.DecimalField(max_digits=9, decimal_places=6)
 
     class Meta:
         ordering = ["name"]
         constraints = [
             models.CheckConstraint(
-                condition=Q(centroid_latitude__gte=RWANDA_LAT_MIN, centroid_latitude__lte=RWANDA_LAT_MAX)
-                & Q(centroid_longitude__gte=RWANDA_LON_MIN, centroid_longitude__lte=RWANDA_LON_MAX),
-                name="sector_centroid_inside_rwanda",
+                condition=Q(reference_latitude__gte=RWANDA_LAT_MIN, reference_latitude__lte=RWANDA_LAT_MAX)
+                & Q(reference_longitude__gte=RWANDA_LON_MIN, reference_longitude__lte=RWANDA_LON_MAX),
+                name="sector_reference_point_inside_rwanda",
             ),
         ]
 
@@ -42,7 +43,7 @@ class Sector(models.Model):
 
     @property
     def reference_point(self) -> tuple[Decimal, Decimal]:
-        return self.centroid_latitude, self.centroid_longitude
+        return self.reference_latitude, self.reference_longitude
 
 
 class WashingStationQuerySet(StationScopedQuerySet):
@@ -78,7 +79,10 @@ class Farmer(models.Model):
     cooperative = models.CharField(max_length=120, blank=True)
     # Stored in E.164 (+2507XXXXXXXX); the serializer normalises local 07XXXXXXXX input.
     phone = models.CharField(max_length=13, unique=True)
-    national_id = models.CharField(max_length=16, unique=True, null=True, blank=True)
+    # Not unique: one person can hold two cooperative memberships (two member numbers), and the
+    # F2 seed farmer shares the F1 contract farmer's ID. member_number is the farmer's natural key.
+    # NULL (not "") when absent, as before; replays compare against None.
+    national_id = models.CharField(max_length=16, null=True, blank=True, db_index=True)  # noqa: DJ001
     home_station = models.ForeignKey(
         WashingStation, on_delete=models.PROTECT, null=True, blank=True, related_name="farmers"
     )

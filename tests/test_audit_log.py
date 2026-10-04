@@ -152,7 +152,7 @@ def test_rows_never_contain_coordinates_or_national_ids():
     for plot in Plot.objects.all():
         secrets |= {str(plot.latitude), str(plot.longitude)}
     for sector in Sector.objects.all():
-        secrets |= {str(sector.centroid_latitude), str(sector.centroid_longitude)}
+        secrets |= {str(sector.reference_latitude), str(sector.reference_longitude)}
     assert not {secret for secret in secrets if secret in stored}
     assert not AuditLog.objects.filter(path__contains="?").exists()
 

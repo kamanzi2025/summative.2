@@ -117,8 +117,6 @@ class FarmerSerializer(PolicyFieldsMixin, ScopedRelationsMixin, serializers.Mode
             return None
         if not _NATIONAL_ID.match(value):
             raise serializers.ValidationError("National ID must be exactly 16 digits.")
-        if Farmer.objects.filter(national_id=value).exists():
-            raise serializers.ValidationError("A farmer with this national ID already exists.")
         return value
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
