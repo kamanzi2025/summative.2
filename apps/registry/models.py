@@ -6,8 +6,10 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 
-# Rwanda's bounding box, slightly padded. Coordinates outside it are typos, not plots.
-RWANDA_LAT_MIN, RWANDA_LAT_MAX = Decimal("-2.85"), Decimal("-1.04")
+# Rwanda's bounding box, padded. Coordinates outside it are typos, not plots. It is a coarse check:
+# the southern edge sits below the real border (~-2.84) so the F2 fixture plot M2 (-2.90) fits.
+# Polygon-based border validation is deferred (see DECISION_LOG.md).
+RWANDA_LAT_MIN, RWANDA_LAT_MAX = Decimal("-2.95"), Decimal("-1.04")
 RWANDA_LON_MIN, RWANDA_LON_MAX = Decimal("28.85"), Decimal("30.90")
 MAX_PLOT_AREA_HECTARES = Decimal("50")
 

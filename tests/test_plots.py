@@ -1,3 +1,4 @@
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -78,14 +79,29 @@ def test_unknown_sector_is_rejected(api, plot_payload):
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    # Kampala's latitude, the equator, Nairobi's longitude, eastern DRC's longitude.
-    [("latitude", "0.347596"), ("latitude", "0.0"), ("longitude", "36.817223"), ("longitude", "28.0")],
+    # Kampala's latitude, the equator, northern Burundi, Nairobi's longitude, eastern DRC's longitude.
+    [
+        ("latitude", "0.347596"),
+        ("latitude", "0.0"),
+        ("latitude", "-2.960000"),
+        ("longitude", "36.817223"),
+        ("longitude", "28.0"),
+    ],
 )
 def test_coordinates_outside_rwanda_are_rejected(api, plot_payload, field, value):
     plot_payload[field] = value
     response = api.post("/api/plots/", plot_payload, format="json")
     assert response.status_code == 400
     assert field in response.json()["error"]["details"]
+
+
+def test_f2_fixture_plot_m2_latitude_is_accepted(api, plot_payload):
+    # M2 (-2.90) sits just south of the real border; the padded bounding box must still accept it.
+    plot_payload.update({"plot_code": "KWA-SEED-M2", "latitude": "-2.900000", "longitude": "29.900000"})
+    with patch("apps.registry.tasks.run_risk_check.delay"):
+        response = api.post("/api/plots/", plot_payload, format="json")
+    assert response.status_code == 201, response.json()
+    assert Plot.objects.get(plot_code="KWA-SEED-M2").latitude == Decimal("-2.900000")
 
 
 @pytest.mark.parametrize("area", ["0", "-0.5", "51"])
