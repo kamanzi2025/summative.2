@@ -101,7 +101,13 @@ def test_token_requests_are_attributed_to_the_token_user():
 def test_anonymous_request_is_recorded():
     row = only_new_row(lambda: APIClient().get("/api/farmers/"))
     assert (row.user, row.username, row.role, row.status_code) == (None, "", "", 401)
-    assert (row.coordinate_precision, row.commercial_terms) == ("", None)
+    assert (row.coordinate_precision, row.national_id, row.commercial_terms) == ("sector", "hidden", False)
+
+
+def test_anonymous_registration_is_recorded(farmer_payload):
+    row = only_new_row(lambda: APIClient().post("/api/farmers/", farmer_payload, format="json"))
+    assert (row.user, row.username, row.method, row.status_code, row.resource) == (None, "", "POST", 201, "farmers")
+    assert len(row.object_ids) == 1
 
 
 def test_user_without_a_role_is_recorded_with_the_restrictive_rules(make_staff_user):

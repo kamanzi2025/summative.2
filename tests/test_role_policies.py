@@ -4,6 +4,7 @@ from django.db import IntegrityError, transaction
 
 from apps.accounts.models import Role, UserProfile
 from apps.accounts.policies import (
+    ANONYMOUS_POLICY,
     NO_ROLE_POLICY,
     ROLE_POLICIES,
     Action,
@@ -35,10 +36,25 @@ def test_every_role_has_a_policy():
 
 
 @pytest.mark.parametrize("resource", list(Resource))
+def test_anonymous_callers_can_read_nothing(resource):
+    assert policy_for(AnonymousUser()) is ANONYMOUS_POLICY
+    assert not can(AnonymousUser(), resource, Action.READ)
+
+
+def test_anonymous_callers_may_only_register_farmers_plots_and_deliveries():
+    writable = {r for r in Resource if can(AnonymousUser(), r, Action.WRITE)}
+    assert writable == {Resource.FARMERS, Resource.PLOTS, Resource.DELIVERIES}
+    assert (ANONYMOUS_POLICY.coordinates, ANONYMOUS_POLICY.national_id, ANONYMOUS_POLICY.commercial_terms) == (
+        CoordinatePrecision.SECTOR,
+        NationalIdVisibility.HIDDEN,
+        False,
+    )
+
+
+@pytest.mark.parametrize("resource", list(Resource))
 @pytest.mark.parametrize("action", list(Action))
-def test_anonymous_users_are_denied_everything(resource, action):
-    assert policy_for(AnonymousUser()) is None
-    assert not can(AnonymousUser(), resource, action)
+def test_no_user_at_all_is_denied_everything(resource, action):
+    assert policy_for(None) is None
     assert not can(None, resource, action)
 
 

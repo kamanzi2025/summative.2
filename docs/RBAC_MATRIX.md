@@ -26,13 +26,13 @@ only):
 | `field_agent` | own washing station only | own station's plots, full coordinates | masked, last 4 digits (`************6789`) | no access (`403`) |
 | `exporter_partner` | all stations | all plots, coordinates replaced by the sector's reference point | field not present | no access (`403`) |
 | `compliance_auditor` | all stations, metadata only: no `unit_price_rwf` or `amount_due_rwf` | all plots, full coordinates | field not present | read (`GET /api/audit-log/`) |
-| unauthenticated | `401` | `401` | n/a | `401` |
+| unauthenticated | `401` (may only create deliveries) | `401` (may only create plots) | n/a | `401` |
 | authenticated, no role | all stations, no commercial terms; may create | all plots, sector reference point; may create | not present | no access (`403`) |
 
 ### Every endpoint, by role
 
-R = read, W = write (create). A blank cell is `403`. For anonymous callers every protected
-endpoint returns `401`.
+R = read, W = write (create). A blank cell is `403`. Anonymous callers get `401` on every read,
+and may only create farmers, plots and deliveries (DECISION_LOG.md, "Anonymous registrations").
 
 | Endpoint | `field_agent` | `exporter_partner` | `compliance_auditor` | no role | Scope for `field_agent` |
 |---|---|---|---|---|---|
@@ -71,8 +71,10 @@ A role is a **profile row**, not a field on Django's `User` and not a group:
   must have a station, and the other two roles must not have one.
 - A logged-in user with **no profile** gets `NO_ROLE_POLICY`: the F1 operations (read and create
   farmers, plots, deliveries) under the most restrictive field rules (no national ID, sector
-  reference points, no prices) and no audit log. Anonymous users, inactive users and invalid
-  profiles are refused everything. See DECISION_LOG.md, "Logged-in users without a role".
+  reference points, no prices) and no audit log. Inactive users and invalid profiles are refused
+  everything. See DECISION_LOG.md, "Logged-in users without a role".
+- An anonymous caller gets `ANONYMOUS_POLICY`: it may only create farmers, plots and deliveries,
+  under the same restrictive response, and every read is `401`.
 
 What each role may do is written once, in `ROLE_POLICIES` (`apps/accounts/policies.py`). Each
 policy is a set of independent settings:

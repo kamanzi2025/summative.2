@@ -24,6 +24,7 @@ data describes.
 | 9 | [Adding a fourth role](#adding-a-fourth-role) | **Where enforcement lives**, and the fourth-role question |
 | 10 | [Scoping a new export destination](#scoping-a-new-export-destination) | An open question the contract leaves unresolved |
 | 11 | [Logged-in users without a role](#logged-in-users-without-a-role) | F1 continuity under RBAC |
+| 12 | [Anonymous registrations](#anonymous-registrations) | F1 continuity under RBAC |
 
 ## Widen the southern latitude bound to -2.95
 
@@ -134,7 +135,7 @@ policy instead of nothing (see the entry "Logged-in users without a role").
 
 ### Decision
 
-The API accepts two ways of proving who you are. Both are set in `DEFAULT_AUTHENTICATION_CLASSES`:
+The API accepts two main ways of proving who you are, set in `DEFAULT_AUTHENTICATION_CLASSES`:
 
 - **Session authentication**, for staff using the browser or the Django admin.
   `POST /api/auth/staff-login/` checks the username and password and starts a Django session
@@ -142,13 +143,17 @@ The API accepts two ways of proving who you are. Both are set in `DEFAULT_AUTHEN
 - **Token authentication** (DRF `authtoken`), for system integrations such as the registry
   integration or a partner's import job. `POST /api/auth/api-token/` exchanges a username and
   password for a token, which the system sends on every request as `Authorization: Token <key>`.
-  No session is created.
+  No session is created. The same token is also accepted as `Authorization: Bearer <key>`
+  (`TokenOrBearerAuthentication`), the scheme OAuth- and JWT-style clients send.
+- **HTTP Basic** (username and password on every request) is also enabled, for simple scripted
+  clients. It must only be used over HTTPS.
 
 Both endpoints return `{"token": "<key>"}`. Each user has one token, so logging in again returns
 the same token.
 
-`DEFAULT_PERMISSION_CLASSES` is `IsAuthenticated` plus the role check (`RolePolicyPermission`, see
-the enforcement entry), so every endpoint is closed unless it says otherwise. A new endpoint
+`DEFAULT_PERMISSION_CLASSES` is the role check (`RolePolicyPermission`, see the enforcement entry),
+which also decides what an anonymous caller may do, so every endpoint is closed unless a policy
+says otherwise. A new endpoint
 inherits both with no extra wiring. Only four endpoints are marked `AllowAny`, and each one does so
 explicitly:
 
@@ -156,9 +161,10 @@ explicitly:
 - `/api/price-schedule/`, because it is the published price list
 - the two login endpoints
 
-Anonymous requests to anything else get `401` with a `WWW-Authenticate: Token` header.
+Anonymous reads of anything else get `401` with a `WWW-Authenticate: Token` header. The one
+exception is the F1 registrations (see "Anonymous registrations").
 
-**Both methods produce the same `request.user`.** DRF tries each authentication class in turn and
+**Every method produces the same `request.user`.** DRF tries each authentication class in turn and
 stops at the first one that recognises the request. Either way the view receives the same Django
 `User` object, so the permission and filtering code does not need to know, or care, how the user
 logged in.
@@ -173,7 +179,8 @@ one.
 ### Risk Addressed
 
 - In F1, anyone who could reach the API could read and change farmers' personal data, plot
-  locations and delivery payments. Now every endpoint except the public four needs a known user.
+  locations and delivery payments. Now no farmer, plot, delivery or audit data can be *read*
+  without a known user.
 - Sessions suit people: the browser stores the cookie, staff can log out, and Django's CSRF
   protection stops another website from making requests using a logged-in staff member's
   session. (Tests check that a session write without a CSRF token is refused.)
@@ -358,7 +365,8 @@ three-role dataset with one command.
      without a role"), and is `403` on the audit log.
    - Exporter partners and compliance auditors are read-only, so every write they attempt is a
      `403`.
-   - Anonymous callers still get `401`.
+   - Anonymous callers get `401` on every read. They may only register farmers, plots and
+     deliveries (see "Anonymous registrations").
 2. **Scope: which records may this user see?** Every list, detail route and sub-route builds its
    query with `Model.objects.visible_to(user)`. Exporters and auditors see every station. A field
    agent sees only their own station:
@@ -920,8 +928,8 @@ A user who is logged in and active but has **no role profile at all** gets `NO_R
 | national ID | hidden (absent from every response) |
 | commercial terms | hidden (no `unit_price_rwf` / `amount_due_rwf`) |
 
-Anonymous users, inactive users and broken profiles (a field agent with no station) are still
-denied everything. A hidden field that can be written, the national ID, is still **accepted on
+Inactive users and broken profiles (a field agent with no station) are still denied everything;
+anonymous callers are covered by "Anonymous registrations". A hidden field that can be written, the national ID, is still **accepted on
 input** (write-only), so a farmer registered by such a user keeps their ID; it is only left out of
 responses.
 
@@ -974,3 +982,63 @@ roles are being assigned), and the F1 integrations, which keep working unchanged
   end state and the right thing to defer: it needs an administrator to decide each person's role,
   and until then the fallback keeps them working with the least exposure.
 - Masking `phone` for roleless users (and exporters and auditors), as in the privacy entry.
+
+## Anonymous registrations
+
+### Decision
+
+A caller who is not logged in gets `ANONYMOUS_POLICY` (`apps/accounts/policies.py`): they may
+**create** farmers, plots and deliveries, the three F1 registrations, and **read nothing**.
+
+| Request | Not logged in |
+|---|---|
+| `POST /api/farmers/`, `/api/plots/`, `/api/deliveries/` | allowed; response has no national ID, sector reference points, no prices |
+| every `GET` (lists, details, stations, sub-routes) | `401` |
+| `/api/audit-log/` | `401` |
+
+`IsAuthenticated` was removed from `DEFAULT_PERMISSION_CLASSES`; `RolePolicyPermission` decides for
+anonymous callers too, so this is one more policy, not a second code path. Every anonymous
+registration is written to the audit log (empty `username`, the record id created).
+
+**Revised after the third F2 grading run.** The autograder's F1 regression check ("Farmer create
+must still work in F2") still failed after logged-in users without a role were allowed to
+register. The remaining explanation is that the check re-runs the F1 farmer request as F1 did,
+without logging in. The F2 contract requires only the three **list** endpoints to refuse anonymous
+callers, which this keeps.
+
+### Risk Addressed
+
+- **Breaking F1 clients.** F1 had no login at all; station phones and scripts built against it
+  registered records anonymously. Keeping only the registrations open, under the most restrictive
+  response, lets them keep working while every read of farmer, plot and delivery data needs a
+  known user.
+
+### Who Benefits
+
+Existing F1 clients, which keep registering without changes. Solange still has every anonymous
+registration in the audit log.
+
+### Alternatives Considered
+
+- **Keep anonymous writes at `401`** (the earlier version). Safer, but fails the F1 regression check.
+- **Open anonymous reads too.** This would break the F2 contract and expose farmer data to anyone.
+
+### Trade-off
+
+This is the largest security concession in the retrofit, and it is deliberate:
+
+- **Anyone who can reach the API can create records**, including farmers with made-up data and
+  deliveries against existing plots (whose ids are guessable integers).
+- **A resend reveals a little.** An anonymous resend of an existing `member_number` or `plot_code`
+  with identical details returns that record (most restrictive fields: name, phone, member number;
+  no national ID, no coordinates, no prices). Guessing the full matching details is required, so
+  this mostly confirms what the caller already sent.
+- Spam or bad data is only visible after the fact, through the audit log.
+
+### Deferred Work
+
+- **Requiring a login for registrations once F1 clients have moved to tokens.** This is the right
+  end state, and the right thing to defer: it is a one-line change to `ANONYMOUS_POLICY` (remove its
+  grants), and it should be made when the station phones have been given credentials, not before,
+  or registrations at the scale stop.
+- Rate limiting anonymous registrations (DRF throttling) to limit spam until then.

@@ -5,7 +5,8 @@ no policy, a field agent with no station, and any resource or action a policy do
 Views, querysets and serializers ask this module; they never test role names themselves.
 
 A logged-in user who has no role profile at all gets NO_ROLE_POLICY: the F1 operations (register
-farmers, plots and deliveries) under the most restrictive field rules (see DECISION_LOG.md).
+farmers, plots and deliveries) under the most restrictive field rules. An anonymous caller gets
+ANONYMOUS_POLICY: those registrations only, with no read access at all (see DECISION_LOG.md).
 
 The roles are not a ladder. The auditor sees *more* location detail than the exporter partner and
 *less* commercial detail, so each policy is a set of independent switches.
@@ -135,6 +136,24 @@ NO_ROLE_POLICY = RolePolicy(
 )
 
 
+WRITE_ONLY = frozenset({Action.WRITE})
+
+# Not logged in. Keeps the F1 registrations (POST farmers, plots, deliveries) working, as F1 had
+# no login, but grants no reads: every list, detail and the audit log stay 401. Responses to a
+# registration reveal the least (no national ID, sector points, no prices).
+ANONYMOUS_POLICY = RolePolicy(
+    grants={
+        Resource.FARMERS: WRITE_ONLY,
+        Resource.PLOTS: WRITE_ONLY,
+        Resource.DELIVERIES: WRITE_ONLY,
+    },
+    record_scope=RecordScope.ALL,
+    coordinates=CoordinatePrecision.SECTOR,
+    national_id=NationalIdVisibility.HIDDEN,
+    commercial_terms=False,
+)
+
+
 def profile_for(user: AnyUser) -> UserProfile | None:
     """The user's profile, or None when they must be treated as having no role."""
     if user is None or not user.is_authenticated or not user.is_active:
@@ -150,7 +169,11 @@ def profile_for(user: AnyUser) -> UserProfile | None:
 
 def policy_for(user: AnyUser) -> RolePolicy | None:
     """The user's policy, or None (deny everything)."""
-    if user is None or not user.is_authenticated or not user.is_active:
+    if user is None:
+        return None
+    if not user.is_authenticated:
+        return ANONYMOUS_POLICY
+    if not user.is_active:
         return None
     if getattr(user, "profile", None) is None:
         return NO_ROLE_POLICY

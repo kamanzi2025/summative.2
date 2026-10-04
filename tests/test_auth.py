@@ -1,5 +1,8 @@
 """Authentication: who the caller is. Role-based authorization is tested in test_role_policies.py."""
 
+import base64
+from unittest.mock import patch
+
 import pytest
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
@@ -47,8 +50,57 @@ def test_anonymous_reads_are_refused(anon_api, path):
 
 
 @pytest.mark.parametrize("path", PROTECTED_LISTS)
-def test_anonymous_writes_are_refused(anon_api, path):
-    assert anon_api.post(path, {}, format="json").status_code == 401
+def test_anonymous_registrations_reach_validation(anon_api, path):
+    """F1 had no login, so the three registrations stay open (ANONYMOUS_POLICY); reads do not."""
+    response = anon_api.post(path, {}, format="json")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_anonymous_f1_flow_registers_but_reveals_nothing(anon_api, farmer_payload, nyaruguru):
+    farmer = anon_api.post("/api/farmers/", farmer_payload, format="json")
+    assert farmer.status_code == 201, farmer.json()
+    assert "national_id" not in farmer.json()
+    plot_body = {
+        "farmer": farmer.json()["id"],
+        "plot_code": "KWA-P-0417-A",
+        "sector": "Kigoma",
+        "washing_station": "Nyaruguru",
+        "latitude": "-2.540000",
+        "longitude": "29.710000",
+        "area_hectares": "0.42",
+    }
+    with patch("apps.registry.tasks.run_risk_check.delay"):
+        plot = anon_api.post("/api/plots/", plot_body, format="json")
+    assert plot.status_code == 201, plot.json()
+    assert plot.json()["coordinate_precision"] == "sector"
+    delivery = anon_api.post(
+        "/api/deliveries/",
+        {"plot": plot.json()["id"], "washing_station": "Nyaruguru", "weight_kg": "38.5", "grade": "A"},
+        format="json",
+    )
+    assert delivery.status_code == 201, delivery.json()
+    assert "amount_due_rwf" not in delivery.json()
+    # Reading back is still refused.
+    assert anon_api.get(f"/api/farmers/{farmer.json()['id']}/").status_code == 401
+    assert anon_api.get("/api/farmers/").status_code == 401
+
+
+def test_bearer_token_authenticates_like_token(agent_user):
+    token, _ = Token.objects.get_or_create(user=agent_user)
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token.key}")
+    assert client.get("/api/farmers/").status_code == 200
+    client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-token")
+    assert client.get("/api/farmers/").status_code == 401
+
+
+def test_basic_auth_authenticates(agent_user):
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION="Basic " + base64.b64encode(b"agent:" + STAFF_PASSWORD.encode()).decode())
+    assert client.get("/api/farmers/").status_code == 200
+    client.credentials(HTTP_AUTHORIZATION="Basic " + base64.b64encode(b"agent:wrong").decode())
+    assert client.get("/api/farmers/").status_code == 401
 
 
 @pytest.mark.parametrize("path", ["/api/status/", "/api/price-schedule/"])

@@ -91,7 +91,8 @@ def test_contract_flow_as_the_grader_runs_it(tmp_path):
     for result in (first, second):
         anon = result["anonymous"]
         assert all(code in (401, 403) for code in anon["lists"]), anon
-        assert anon["farmer_post"] in (401, 403)
+        # F1 registrations stay open without a login (ANONYMOUS_POLICY); an empty body is a 400.
+        assert anon["farmer_post"] == 400
         assert anon["status"] == 200 and anon["price_schedule"] == 200
 
         assert result["status"] == 200

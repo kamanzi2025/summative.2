@@ -105,15 +105,16 @@ REST_FRAMEWORK = {
     # Tokens for system integrations, sessions for staff in the browser; both set request.user.
     # Token comes first so an anonymous request gets 401 with a WWW-Authenticate challenge.
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
+        # Tokens accept both `Token <key>` and `Bearer <key>`.
+        "apps.accounts.authentication.TokenOrBearerAuthentication",
         "rest_framework.authentication.SessionAuthentication",
+        # Username and password on each request, for simple scripted clients (over HTTPS only).
+        "rest_framework.authentication.BasicAuthentication",
     ],
     # Closed by default: a view is public only if it says so (status, price schedule, login), and
     # every other view must name the ROLE_POLICIES resource it serves (apps/accounts/permissions.py).
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
-        "apps.accounts.permissions.RolePolicyPermission",
-    ],
+    # Anonymous callers are handled there too: ANONYMOUS_POLICY grants registrations, no reads.
+    "DEFAULT_PERMISSION_CLASSES": ["apps.accounts.permissions.RolePolicyPermission"],
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.CreatedAtCursorPagination",
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",

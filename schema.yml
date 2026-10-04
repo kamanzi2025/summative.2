@@ -76,6 +76,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -194,6 +195,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -216,6 +218,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '201':
           content:
@@ -248,6 +251,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -280,6 +284,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -304,6 +309,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '201':
           content:
@@ -338,6 +344,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -400,6 +407,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -424,6 +432,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '201':
           content:
@@ -458,6 +467,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -482,6 +492,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -505,6 +516,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       - {}
       responses:
         '200':
@@ -521,6 +533,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -545,6 +558,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -618,6 +632,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       responses:
         '200':
           content:
@@ -639,6 +654,7 @@ paths:
       security:
       - tokenAuth: []
       - cookieAuth: []
+      - basicAuth: []
       - {}
       responses:
         '200':
@@ -1343,6 +1359,9 @@ components:
       - name
       - sector
   securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
     cookieAuth:
       type: apiKey
       in: cookie
