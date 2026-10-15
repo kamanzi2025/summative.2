@@ -6,14 +6,25 @@ every page -- not just the first page or the detail view. Fails when
 coarsening is applied by a code path that only covers page one.
 """
 
+# Ported from the summative/seed version (eeffead) to this project's layout. Changes, and why:
+# - Imports: `core.models` -> `apps.registry.models` (models live in apps/registry here).
+# - Plot.sector and Plot.washing_station are foreign keys to Sector and WashingStation, not strings,
+#   so the loop looks up the seeded "Kigoma"/"Mbazi" sectors and "Nyaruguru"/"Kamonyi" stations
+#   (migration registry/0002) instead of passing names. `raw.sector` is a Sector, so the
+#   per-sector bucket is keyed on `raw.sector.name`.
+# - PAGE_SIZE is read from the paginator GET /api/plots/ really uses (PlotViewSet.pagination_class,
+#   cursor pagination) instead of being hard-coded to 20.
+# Scenario, data volume (2 x PAGE_SIZE extra plots) and every assertion are unchanged.
+
 from decimal import Decimal
 from urllib.parse import urlsplit
 
 import pytest
 
-from core.models import Farmer, Plot
+from apps.registry.models import Farmer, Plot, Sector, WashingStation
+from apps.registry.views import PlotViewSet
 
-PAGE_SIZE = 20  # config/settings.py REST_FRAMEWORK["PAGE_SIZE"]
+PAGE_SIZE = PlotViewSet.pagination_class.page_size
 
 
 def _next_path(body):
@@ -34,16 +45,19 @@ def test_coarsened_coordinates_hold_on_every_page(as_role):
     farmer = Farmer.objects.first()
     assert farmer is not None, "seed_rbac_fixtures did not create the seed farmer"
 
+    sectors = {name: Sector.objects.get(name=name) for name in ("Kigoma", "Mbazi")}
+    stations = {name: WashingStation.objects.get(name=name) for name in ("Nyaruguru", "Kamonyi")}
+
     # The fixture command only creates 4 plots -- not enough to force a
-    # second page at PAGE_SIZE=20. Add enough plots to guarantee pagination
+    # second page at PAGE_SIZE. Add enough plots to guarantee pagination
     # actually exercises more than the first page.
     for i in range(2 * PAGE_SIZE):
         sector = "Kigoma" if i % 2 == 0 else "Mbazi"
         Plot.objects.create(
             farmer=farmer,
             plot_code=f"KWA-STAGING-{i:03d}",
-            sector=sector,
-            washing_station="Nyaruguru" if sector == "Kigoma" else "Kamonyi",
+            sector=sectors[sector],
+            washing_station=stations["Nyaruguru" if sector == "Kigoma" else "Kamonyi"],
             latitude=Decimal("-2.000000") + Decimal(i) / Decimal(1000),
             longitude=Decimal("29.000000") + Decimal(i) / Decimal(1000),
             area_hectares=Decimal("1.00"),
@@ -68,7 +82,7 @@ def test_coarsened_coordinates_hold_on_every_page(as_role):
                 f"plot {returned['plot_code']} on page {pages_walked + 1} returned its raw "
                 "stored coordinate to exporter_partner instead of a coarsened one"
             )
-            seen_by_sector.setdefault(raw.sector, set()).add(returned_point)
+            seen_by_sector.setdefault(raw.sector.name, set()).add(returned_point)
 
         pages_walked += 1
         path = _next_path(body)
