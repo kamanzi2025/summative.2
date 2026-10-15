@@ -29,8 +29,6 @@ verification) -- that is real open Summative-stage work, not a test bug.
 # - Added a setup guard asserting the risk check really failed (every attempt an error, plot not
 #   clear), so the scenario cannot silently pass because the registry happened to answer.
 # STATUS_LIKE_FIELDS and the final assertion are unchanged.
-# Marked xfail(strict=True) until the fix: the failure is genuine (see BUG_REPORT.md), and strict
-# means the suite goes red as soon as the fix lands, forcing the marker to be removed.
 
 from unittest.mock import patch
 
@@ -42,10 +40,6 @@ from apps.registry.tasks import run_risk_check
 STATUS_LIKE_FIELDS = {"status", "state", "export_status", "risk_check_status", "rejection_reason"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Known Summative bug: a delivery on a plot whose risk check failed has no export status or reason",
-)
 @pytest.mark.django_db
 def test_delivery_reaches_an_observable_state_after_failed_risk_check(
     as_role, settings, django_capture_on_commit_callbacks
