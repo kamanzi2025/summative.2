@@ -1,0 +1,38 @@
+
+==================================== ERRORS ====================================
+_____ ERROR collecting tests/staging/test_delivery_risk_check_stranding.py _____
+ImportError while importing test module '/Users/kamanzi/Desktop/summative /advanced-python-programming-kawa-kamanzi2025/tests/staging/test_delivery_risk_check_stranding.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/staging/test_delivery_risk_check_stranding.py:20: in <module>
+    from core.models import Farmer
+E   ModuleNotFoundError: No module named 'core'
+_________ ERROR collecting tests/staging/test_pagination_coarsening.py _________
+ImportError while importing test module '/Users/kamanzi/Desktop/summative /advanced-python-programming-kawa-kamanzi2025/tests/staging/test_pagination_coarsening.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/staging/test_pagination_coarsening.py:14: in <module>
+    from core.models import Farmer, Plot
+E   ModuleNotFoundError: No module named 'core'
+_______ ERROR collecting tests/staging/test_price_schedule_staleness.py ________
+ImportError while importing test module '/Users/kamanzi/Desktop/summative /advanced-python-programming-kawa-kamanzi2025/tests/staging/test_price_schedule_staleness.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/staging/test_price_schedule_staleness.py:16: in <module>
+    from core import views as core_views
+E   ModuleNotFoundError: No module named 'core'
+=========================== short test summary info ============================
+ERROR tests/staging/test_delivery_risk_check_stranding.py
+ERROR tests/staging/test_pagination_coarsening.py
+ERROR tests/staging/test_price_schedule_staleness.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 3 errors during collection !!!!!!!!!!!!!!!!!!!!
+3 errors in 0.49s
