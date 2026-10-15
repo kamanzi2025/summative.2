@@ -17,3 +17,6 @@ venv/
 .venv*/
 staticfiles/
 *.sqlite3
+
+# Personal viva preparation notes (not part of the submission)
+VIVA_NOTES.md
