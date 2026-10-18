@@ -1,155 +1,200 @@
 # Bug Report: Summative
 
-This report covers the three staging scenarios from `summative/seed` and the defects found while
-hardening the Kawa Network API for the Nyaruguru rollout. Each entry follows
-`docs/templates/BUG_REPORT_TEMPLATE.md`.
+This report records the three seeded staging scenarios and additional pricing defects found while
+hardening the Kawa Network API. It distinguishes the original seed collection problem, current
+passing regression evidence, and historical claims that cannot be reconstructed.
 
-## Staging scenarios at a glance
+## Verification record
 
-The seed tests could not run as delivered. They import a `core` package that this project does
-not have, so all three failed at collection. The raw output is in
-`docs/evidence/staging_raw_output.txt`. I ported each test to this project's layout without
-weakening any assertion; each file starts with a comment listing exactly what changed.
+- Before the changes described in this report update, the last verified full suite was
+  `.venv/bin/python -m pytest -q`: **321 passed in 29.11s**. This is a prior result; it does not
+  include the logging tests and local checks added afterward.
+- A previous full-suite result, before the no-role policy change below, was
+  `DATABASE_URL=sqlite:///:memory: .venv/bin/python -m pytest -q`: **328 passed in 21.04s**. It
+  included the JSON logging tests, auditor access-matrix assertion, fixture seeder pricing check,
+  and default-date consistency check. This is historical evidence, not the latest result. The
+  standalone deployment smoke and benchmark under `local_checks/` are run explicitly and are not
+  in pytest's configured default test paths.
+- The latest isolated full-suite run after the pricing changes was **340 passed in 32.81s**. The exact command was:
 
-| # | Scenario | Test | Result after porting |
-|---|---|---|---|
-| 1 | Coordinate precision under pagination | `tests/staging/test_pagination_coarsening.py` | **Passes.** An F1/F2 decision prevents the fault (below). |
-| 2 | Stale price schedule after a mid-season update | `tests/staging/test_price_schedule_staleness.py` | **Passes.** An F1 decision prevents the fault (below). |
-| 3 | Delivery stranded on a failed risk check | `tests/staging/test_delivery_risk_check_stranding.py` | **Fails.** A genuine defect, diagnosed and fixed below. |
+  ```bash
+  PYTHONDONTWRITEBYTECODE=1 DATABASE_URL=sqlite:///:memory: .venv/bin/python -m pytest -p no:cacheprovider -q
+  ```
 
-To show that the two passing tests are not vacuous, I re-ran each one with the protecting code
-disabled in memory. Each then failed, with the messages quoted below.
+  It includes the fail-closed policy for
+  authenticated users without a valid role, denial tests for their reads and writes at both
+  stations, anonymous F1 registration coverage, and the existing assigned-role checks. It also
+  includes the pricing regression tests below. It used an in-memory database and disabled bytecode
+  and pytest cache writes.
+- Focused pricing, delivery and fixture-seeding tests: **50 passed in 3.84s**. Staging tests:
+  **3 passed in 2.85s**. Both used the in-memory SQLite test database.
+- Ruff lint and formatting checks, mypy, Django system checks, migration consistency, OpenAPI
+  validation, and `git diff --check` passed after the final formatting change.
+- Before that passing run, the first full-suite run after the policy change had **338 passed and 1
+  failed in 20.58s**. The failure was an old field-rule test expecting an authenticated user with
+  no role to create a farmer. That test now exercises the still-public anonymous F1 registration
+  path instead; the policy behavior was not weakened to satisfy it.
+- The three original files under `summative/seed` did not collect in this repository because they
+  imported a `core` package that is not present here. The exact collection errors are preserved in
+  `docs/evidence/staging_raw_output.txt`. The adapted tests under `tests/staging/` use this
+  repository's `apps.*` layout.
+- The original staging result was a collection failure, not a recorded failing product assertion.
+  No preserved test output demonstrates that the adapted regression tests failed before a fix.
+  Where Git history does not show a test preceding a fix, this report makes no test-first claim.
 
----
+## Staging scenario 1: Coordinate precision across pagination
 
-## Scenario 1: Coordinate precision under pagination (passes)
+**Symptom under investigation:** An `exporter_partner` could receive a plot's precise stored
+coordinates on a later page even if the first page or detail response were coarsened. Precise plot
+coordinates identify a family's land, so the consequence would be a location privacy breach.
 
-### Bug Summary
+**Cause and current protection:** The implementation applies `CoordinateField` to both plot
+coordinate fields. That field consults `policy_for(user)` and returns the sector reference point
+for `exporter_partner` readers. The same serializer is used for every paginated row, and the cursor
+contains ordering position rather than coordinates. The tested path has no page-specific
+coarsening branch. The scenario did not establish a current leak.
 
-The scenario asks whether an exporter partner walking every page of `GET /api/plots/` ever
-receives a plot's stored coordinates instead of the coarsened ones. It catches implementations
-that coarsen in one code path, such as the first page or the detail view, and miss others.
+**Evidence and result:**
 
-### Why It Matters
+- `tests/staging/test_pagination_coarsening.py::test_coarsened_coordinates_hold_on_every_page`
+  walks the cursor pages, compares each returned point to the stored plot point, and checks one
+  consistent point per sector and distinct points between sectors. It passed in the latest
+  verified 340-test run.
+- `tests/test_field_rules.py` and `tests/test_sector_reference_points.py` cover the shared field
+  rule and sector reference points. They were included in that same passing suite.
+- The adapted staging test's comment records its changes from the seed: model imports, foreign key
+  lookups, and deriving page size from the configured paginator. It says the assertions and
+  scenario volume were preserved.
 
-Exporter partners must see location only at sector precision (F2 access matrix). Exact plot
-coordinates identify a family's land. A leak on page 2 is still a leak.
+**Limit:** The serializer rule does not govern code paths that bypass DRF serialization, such as a
+future raw query export. The current tests cover the API serializer path.
 
-### Why the fault cannot happen here: the F2 decisions that prevent it
+## Staging scenario 2: Price schedule after a mid-season update
 
-1. **Coarsening is a property of the field, not of a view or page.** `CoordinateField` in
-   `apps/accounts/field_rules.py` overrides `get_attribute()`. When the reader's policy says
-   `CoordinatePrecision.SECTOR`, it returns `instance.sector.reference_latitude/longitude`
-   instead of the plot's own value. `PlotSerializer` declares `latitude` and `longitude` as
-   `CoordinateField`s, so every serialisation of a plot goes through it: list pages, detail,
-   nested plots, and the response to a create. Pagination only decides *which rows* are
-   serialised, never *how*.
-2. **One central policy decides precision.** `policy_for(user)` in
-   `apps/accounts/policies.py` maps `exporter_partner` to `CoordinatePrecision.SECTOR`. Views
-   never test role names, so no view can forget.
-3. **A fixed reference point per sector, not rounding.** Every plot in a sector reports the same
-   point, chosen so that no rounding of a real plot coordinate reaches it (migration
-   `registry/0010`, DECISION_LOG.md "Coordinate precision by role"). This is why the test's
-   "one consistent point per sector" and "different sectors, different points" assertions hold.
-4. **Cursor pagination leaks no coordinates.** The cursor encodes only a position in
-   `(-created_at, -id)` (`apps/core/pagination.py`), and `PlotFilter` offers no coordinate
-   filters or ordering. A caller therefore cannot narrow down a plot's location by filtering or
-   sorting.
-5. **A guard against new leaks.** `tests/test_field_rules.py` fails if a serializer exposes a
-   protected field without its rule.
+**Symptom under investigation:** A station could continue seeing an old price after a schedule
+update. The domain consequence is that a farmer may be quoted a stale farm-gate price.
 
-### Regression Evidence
+**Cause and current protection:** `PriceScheduleView.get()` fetches the currently effective
+  schedule on each request; there is no server-side cache to invalidate. `Cache-Control` permits a
+  client or proxy to reuse a response for up to 60 seconds. Schedules are date-effective, and
+  `get_active_schedule()` selects the latest active schedule whose `effective_from` is no later than
+  the requested date, across season labels under the project's chosen assumption below. The
+  staging test itself updates a schedule within the same season; it does not establish cross-season
+  precedence.
 
-- `tests/staging/test_pagination_coarsening.py` passes. It walks 3 pages (44 plots, page size
-  20), and every row is coarsened.
-- **Sabotage check:** with `CoordinateField.get_attribute` replaced in memory by plain
-  `DecimalField.get_attribute`, the test fails:
-  `plot KWA-STAGING-039 on page 1 returned its raw stored coordinate to exporter_partner instead of a coarsened one`.
-- Existing coverage: `tests/test_field_rules.py`, `tests/test_sector_reference_points.py`.
+**Evidence and result:**
 
-### Residual Risk
+- `tests/staging/test_price_schedule_staleness.py::test_price_schedule_reflects_update_within_documented_window`
+  updates through `activate_schedule()`, checks the next GET returns the updated price, and checks
+  the 60-second cache header. It passed in the latest verified 340-test run.
+- `tests/test_pricing_and_errors.py::test_price_change_is_served_on_next_request` also checks
+  that a changed price is read on the next request.
 
-- Anything that bypasses DRF serializers would bypass the rule: the Django admin, a future CSV
-  export, or raw `values()` queries. Only staff can reach the admin today.
-- The reference point reveals the sector, by design. A sector with a single plot would let an
-  exporter tie that plot to the sector, which is no finer than the policy allows.
+The seed failure mode describes an application that introduces a server-side cache without an
+invalidation path. That condition is not present in the current implementation. The initial seed
+collection failure and the adapted test's current passing result do not demonstrate that this
+repository previously had a stale-cache defect.
 
----
+## Staging scenario 3: Delivery after a failed risk check
 
-## Scenario 2: Stale price schedule after a mid-season update (passes)
+**Symptom:** Before the current implementation update, delivery responses exposed only a boolean
+`is_exportable` and the delivery-time risk snapshot. A delivery whose registry check failed did not
+explain whether it was held or why. The domain consequence was that station and export users could
+not distinguish a pending or unverified delivery from a rejected one, delaying or misdirecting
+traceability decisions.
 
-### Bug Summary
+**Cause and current behavior:** The delivery representation had no explanatory export status or
+reason. The configured registry URL also lacked a provider contract, so using a simulator result
+for a configured URL could have represented an unsupported external clearance. Current delivery
+create, detail, and feed representations expose `export_status` and `export_status_reason` from the
+plot's current risk status. A non-empty `REGISTRY_API_URL` fails closed with a static error until a
+registry contract is supplied; an empty value selects the simulator. Failed checks are retried and
+recorded, while delivery recording and payment snapshots do not wait for registry success.
 
-The scenario asks whether, after the price schedule is updated mid-season, `GET /api/price-schedule/`
-serves the new price within the invalidation window the README documents. It catches F1
-implementations that added a cache with no invalidation path.
+**Evidence and result:**
 
-### Why It Matters
+- `tests/test_risk_check_stranding.py` covers unsupported configured-registry behavior, retry
+  attempts, URL secrecy, held status after failure, and response/feed fields. It passed in the
+  latest verified 340-test run.
+- `tests/staging/test_delivery_risk_check_stranding.py::test_delivery_reaches_an_observable_state_after_failed_risk_check`
+  exercises a failed check followed by delivery recording and asserts that the response has a
+  status-like field. It passed in the latest run. Its assertion accepts any one of several field names;
+  the dedicated tests assert the exact `export_status` and `export_status_reason` contract.
+- `tests/test_deliveries.py` and `tests/test_feed.py` cover the create/detail/feed API paths.
 
-The price schedule is what a field agent reads out to a farmer at the scale. A stale price means
-a farmer is told, or paid, the wrong amount.
+The actual provider HTTP integration remains unsupported because its request, authentication, and
+response contract has not been supplied. No real registry request was made for these tests.
 
-### Why the fault cannot happen here: the F1 decisions that prevent it
+## Own defect: Future-effective schedule deactivated the current price too early
 
-1. **No server-side cache, on purpose.** `PriceScheduleView.get()` in
-   `apps/pricing/views.py` calls `get_active_schedule()` (`apps/pricing/services.py`) on every
-   request, which is one indexed query over a handful of rows. ADR.md records the trade-off:
-   caching a tiny table saves almost nothing, and it adds an invalidation problem on the one
-   endpoint where staleness costs a farmer money. With no cache, there is nothing to invalidate.
-2. **Prices are database rows with one active schedule per season.** A mid-season change is a
-   new `PriceSchedule` activated by `activate_schedule()`. That function is atomic, and the DB
-   constraint `one_active_schedule_per_season` guarantees there is never more than one candidate.
-3. **Delivery pricing never uses a cached value.** `DeliverySerializer.validate()` calls
-   `get_active_price(grade)` when each delivery is recorded. `record_delivery()` then stores
-   `unit_price_rwf`, `amount_due_rwf` and the `price_schedule` foreign key on the delivery, so a
-   later change never rewrites what a farmer was paid.
-4. **The client-side window is explicit and documented.** The response carries
-   `Cache-Control: public, max-age=60` (`PRICE_SCHEDULE_MAX_AGE_SECONDS`). README "Cache
-   invalidation" says a client or proxy may show the old price for at most 60 seconds.
+The earlier `activate_schedule()` implementation deactivated every active schedule in the season
+as soon as a replacement was activated, even when the replacement's `effective_from` was in the
+future. Until that date, the price endpoint could have no effective schedule and delivery
+validation could reject otherwise valid deliveries. This is a farmer payment and intake continuity
+defect.
 
-### Regression Evidence
+The current implementation retains schedules for distinct effective dates and selects the latest
+active schedule effective on the requested date across all season labels. Treating season as a
+descriptive label on one global pricing timeline is the project's chosen assumption; the assignment
+contracts do not specify cross-season precedence. A database constraint now permits only one
+active schedule per effective date globally. Activation rejects same-date schedules from another
+season, and the selector fails closed on ambiguous dates. Migration
+`apps/pricing/migrations/0004_global_effective_date_uniqueness.py` checks for existing conflicts
+before changing the constraint; it does not reconcile or delete schedule data. Evidence is in
+`tests/test_pricing_and_errors.py::test_future_schedule_keeps_current_price_until_effective_date`,
+`tests/test_pricing_and_errors.py::test_activation_rejects_cross_season_schedule_with_same_effective_date`,
+`apps/pricing/services.py`, and migration
+`apps/pricing/migrations/0003_schedule_by_effective_date.py`. The tests passed in the latest
+340-test run. The prior committed implementation is inspectable in Git history, but no preserved
+pre-fix failing-test output establishes test-first chronology.
 
-- `tests/staging/test_price_schedule_staleness.py` passes. The very next GET after
-  `activate_schedule()` serves the new grade-A price, and the header is `max-age=60`.
-- **Sabotage check:** with an F1-style memoising cache (no invalidation) wrapped around
-  `get_active_schedule` in the view, the test fails:
-  `expected 797.00, got 760.00`.
+## Additional pricing defect: Late-synced deliveries used today's price
 
-### Residual Risk
+Before the current change, delivery validation selected a price without passing the delivery date,
+so a late sync could select using the server's current date instead of the delivery date. When those
+dates fall on opposite sides of a schedule change, this can snapshot the wrong rate and overpay or
+underpay a farmer. The current code selects the globally effective schedule for `delivered_on` and
+persists the unit-price, amount, and schedule snapshots. The regression test checks a delivery dated
+before the update uses the old rate, and deliveries dated on and after a cross-season update use the
+new rate. The exact cross-season precedence is a project assumption, not an assignment requirement.
 
-- For up to 60 s after a change, a phone or proxy may display the old price while a delivery
-  recorded in that window is priced (correctly) at the new one. This is documented and bounded,
-  but the farmer could briefly see a different figure on screen than on the receipt.
-- See "Price edge cases investigated" below for the two date-related defects found while checking
-  this scenario.
+Evidence is in `tests/test_deliveries.py::test_late_synced_delivery_uses_price_effective_on_delivery_date`
+and the prior committed serializer implementation in Git history. The regression test passed in the
+latest 340-test run. No preserved failing output or commit history demonstrates that this test
+existed before the implementation change.
 
----
+## Other pricing checks
 
-## Scenario 3: Delivery stranded on a failed risk check (fails: open)
+- The 60-second `Cache-Control` lifetime matches the documented client/proxy reuse window; the
+  next server request reads the current effective schedule.
+- When `delivered_on` is omitted, the serializer captures `timezone.localdate()` once and uses the
+  same date for both selection and storage. The effective-date boundary follows `Africa/Kigali`.
+- An immediate schedule change takes effect on its date. Existing deliveries retain their stored
+  payment snapshots.
 
-### Bug Summary
+These points are covered by the current date-based pricing implementation and tests. Earlier
+drafts referred to throwaway probe tests, but no probe files or captured output are preserved, so
+those probes are not presented as independent evidence here.
 
-When the deforestation-risk registry never answers for a plot, deliveries from that plot carry no
-export status and no reason. The ported test fails on its unchanged assertion: the response has
-none of `status`, `state`, `export_status`, `risk_check_status` or `rejection_reason`. It only has
-`is_exportable: false` and the risk status as it was at delivery time.
+## Additional date-consistency protections
 
-Root cause, fix and regression evidence follow in this entry once the fix lands (Summative
-Step 4). Until then the staging test is marked `xfail(strict=True)` so that CI stays green.
+- `tests/test_seed_rbac_fixtures.py::test_seeded_deliveries_use_price_effective_on_the_fixture_delivery_date`
+  verifies that the fixed-date F2 fixture gets its price from that fixture date, even when a newer
+  schedule is already active by the time it is seeded.
+- `tests/test_deliveries.py::test_default_delivery_date_is_the_same_date_used_for_price_selection`
+  verifies that an API request omitting `delivered_on` stores the same local date used to select its
+  price. The serializer now makes that date explicit before saving, avoiding a midnight-boundary
+  mismatch between validation and the model default.
+- `tests/test_seed_demo.py::SeedDemoPricingTests::test_seeded_deliveries_use_one_date_for_price_and_delivery`
+  verifies that the demo command captures one local date and passes it to both schedule selection
+  and delivery recording.
 
----
+These are current regression assertions. The report does not claim a failing-test-first chronology
+for them.
 
-## Price edge cases investigated
+## Broker credential redaction
 
-These were checked with throwaway probe tests against a migrated test database (freezing
-`timezone.now()` where time mattered). I did not change any code to check them.
-
-| Edge case | Finding | Verdict |
-|---|---|---|
-| `Cache-Control: max-age=60` vs README wording | The README says a client or proxy may show old prices for **at most 60 seconds**, and the header is `public, max-age=60`. A compliant shared cache sends `Age`, so the client and proxy together still stay within 60 s. | **Accurate. Not a bug.** |
-| "Already in effect" with dates vs datetimes, `TIME_ZONE`/`USE_TZ` | Every "today" in the price and delivery code is `timezone.localdate()`, which uses `TIME_ZONE = "Africa/Kigali"`. At 22:30 UTC on 14 Oct it returns **15 Oct** (00:30 in Kigali), and a schedule effective 15 Oct applies. `effective_from` is a `DateField`, so no datetime is ever compared against it. There is no `date.today()` or `now().date()` anywhere. | **Correct. Not a bug.** Prices switch at Kigali midnight. |
-| Two schedules switching mid-day | `activate_schedule()` flips `is_active` in one transaction. A delivery recorded one minute after activation gets the **new** price (900 vs the old 760 in the probe). Deliveries recorded before activation keep their snapshot. Activation is immediate because `effective_from` is date-granular. | **Behaves as designed.** |
-| Activating a **future-dated** schedule in the same season | `activate_schedule()` deactivates the current schedule at once, but the new one only counts from its `effective_from`. Until then **no schedule is in effect**: `GET /api/price-schedule/` returns **404** and every delivery is rejected with "No active price for grade A". | **Real defect** (confirmed by probe). |
-| Back-dated delivery (`delivered_on` in the past) | `DeliverySerializer.validate()` prices with `get_active_price(grade)`, i.e. **today's** price, not the price in effect on `delivered_on`. A delivery made yesterday at 760 RWF/kg but synced from a 2G phone after today's switch is recorded at 900 RWF/kg. | **Real defect**, if the rule is "the farmer is paid the price of the delivery day" (the farm-gate price is paid at the scale). |
-
-Which of these is fixed, and how, is recorded in the "Own defect" entry below.
+The broker outage path in `enqueue_risk_check()` logs a warning without the transport exception
+text or traceback. `tests/test_logging.py::test_broker_outage_log_does_not_expose_connection_credentials`
+injects an exception containing a credential-bearing broker URL and asserts that neither the URL
+nor its password appears in captured logs. The full suite's current result includes this test.

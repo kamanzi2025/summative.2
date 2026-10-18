@@ -14,6 +14,7 @@ from apps.registry.clients import (
     RegistryUnavailable,
     RiskAssessment,
     SimulatedRiskRegistry,
+    get_registry_client,
 )
 from apps.registry.models import AttemptOutcome, Plot, RiskStatus
 from apps.registry.tasks import requeue_stale_risk_checks, run_risk_check
@@ -219,7 +220,7 @@ class TestSimulatedRegistry:
 
 
 def test_status_reports_the_risk_check_backlog(anon_api, make_plot, settings):
-    """A stalled worker is visible on /api/status/ without failing the liveness probe."""
+    """A stalled worker appears in the backlog signal without changing the API status value."""
     settings.RISK_CHECK_STALE_HOURS = 6
     settings.RISK_CHECK_MANUAL_REVIEW_DAYS = 7
     make_plot()  # fresh pending: not stale yet
@@ -236,6 +237,12 @@ def test_status_reports_the_risk_check_backlog(anon_api, make_plot, settings):
     assert backlog["stale"] == 2
     assert backlog["requires_manual_review"] == 1
     assert backlog["healthy"] is False
+
+
+def test_empty_registry_url_keeps_simulator(settings):
+    settings.REGISTRY_API_URL = ""
+
+    assert isinstance(get_registry_client(), SimulatedRiskRegistry)
 
 
 def test_status_is_healthy_with_no_backlog(anon_api, db):

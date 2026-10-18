@@ -14,7 +14,7 @@ class DeliveryFeedFilter(django_filters.FilterSet):
     risk_status = django_filters.ChoiceFilter(field_name="plot__risk_status", choices=RiskStatus.choices)
     # Phones pass the recorded_at of the newest row they hold to fetch only newer rows.
     since = django_filters.IsoDateTimeFilter(field_name="recorded_at", lookup_expr="gt")
-    # ?exportable=false&risk_status=flagged is the review list for cherry already paid for.
+    # ?exportable=false&risk_status=flagged reviews recorded cherry from plots later flagged.
     exportable = django_filters.BooleanFilter(method="filter_exportable")
 
     class Meta:

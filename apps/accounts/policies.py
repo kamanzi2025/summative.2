@@ -4,9 +4,8 @@ Deny by default. Anything not granted here is refused: anonymous or inactive use
 no policy, a field agent with no station, and any resource or action a policy does not list.
 Views, querysets and serializers ask this module; they never test role names themselves.
 
-A logged-in user who has no role profile at all gets NO_ROLE_POLICY: the F1 operations (register
-farmers, plots and deliveries) under the most restrictive field rules. An anonymous caller gets
-ANONYMOUS_POLICY: those registrations only, with no read access at all (see DECISION_LOG.md).
+A logged-in user without a valid role profile is denied access to protected resources. An anonymous
+caller gets ANONYMOUS_POLICY: F1 registrations only, with no read access (see DECISION_LOG.md).
 
 The roles are not a ladder. The auditor sees *more* location detail than the exporter partner and
 *less* commercial detail, so each policy is a set of independent switches.
@@ -119,23 +118,6 @@ ROLE_POLICIES: Mapping[str, RolePolicy] = MappingProxyType(
 )
 
 
-# Logged in, active, but never given a role. Keeps the F1 operations working (register and list
-# farmers, plots and deliveries) while revealing the least: no national ID, sector reference
-# points instead of coordinates, no prices, no audit log.
-NO_ROLE_POLICY = RolePolicy(
-    grants={
-        Resource.FARMERS: READ_WRITE,
-        Resource.PLOTS: READ_WRITE,
-        Resource.DELIVERIES: READ_WRITE,
-        Resource.STATIONS: READ_ONLY,
-    },
-    record_scope=RecordScope.ALL,
-    coordinates=CoordinatePrecision.SECTOR,
-    national_id=NationalIdVisibility.HIDDEN,
-    commercial_terms=False,
-)
-
-
 WRITE_ONLY = frozenset({Action.WRITE})
 
 # Not logged in. Keeps the F1 registrations (POST farmers, plots, deliveries) working, as F1 had
@@ -175,10 +157,9 @@ def policy_for(user: AnyUser) -> RolePolicy | None:
         return ANONYMOUS_POLICY
     if not user.is_active:
         return None
-    if getattr(user, "profile", None) is None:
-        return NO_ROLE_POLICY
-    # A profile that exists but is invalid (unknown role, field agent without a station) is denied.
     profile = profile_for(user)
+    # Missing profiles and invalid profiles are deny-by-default. F1's public create compatibility
+    # is provided only by ANONYMOUS_POLICY; an authenticated account must have an assigned role.
     return ROLE_POLICIES.get(profile.role) if profile else None
 
 

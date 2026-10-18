@@ -1,5 +1,6 @@
 """seed_rbac_fixtures must create exactly the F2 contract fixtures, idempotently."""
 
+import datetime
 from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
@@ -9,8 +10,11 @@ from django.contrib.auth.models import User
 from django.core.management import CommandError, call_command
 from rest_framework.test import APIClient
 
+from apps.accounts.management.commands.seed_rbac_fixtures import DELIVERED_ON
 from apps.accounts.models import Role, UserProfile
 from apps.deliveries.models import Delivery
+from apps.pricing.models import PriceEntry, PriceSchedule
+from apps.pricing.services import activate_schedule
 from apps.registry.models import Farmer, Plot
 
 pytestmark = pytest.mark.django_db
@@ -81,6 +85,33 @@ def test_creates_one_delivery_per_station():
     ]
     for delivery in deliveries:
         assert delivery.amount_due_rwf == delivery.weight_kg * delivery.unit_price_rwf
+
+
+def test_seeded_deliveries_use_price_effective_on_the_fixture_delivery_date():
+    original = PriceSchedule.objects.get(is_active=True)
+    later_effective_date = DELIVERED_ON + datetime.timedelta(days=1)
+    later = PriceSchedule.objects.create(season=original.season, effective_from=later_effective_date)
+    PriceEntry.objects.bulk_create(
+        PriceEntry(
+            schedule=later,
+            grade=entry.grade,
+            price_per_kg_rwf=Decimal("900.00") if entry.grade == "A" else entry.price_per_kg_rwf,
+        )
+        for entry in original.entries.all()
+    )
+    activate_schedule(later)
+
+    # At seed time, the newer schedule has taken effect; the fixture delivery itself is backdated.
+    with patch(
+        "apps.pricing.services.timezone.localdate",
+        return_value=later_effective_date + datetime.timedelta(days=1),
+    ):
+        seed()
+
+    delivery = Delivery.objects.get(client_reference="seed-rbac-K1")
+    assert delivery.delivered_on == DELIVERED_ON
+    assert delivery.price_schedule_id == original.pk
+    assert delivery.unit_price_rwf == original.entries.get(grade="A").price_per_kg_rwf
 
 
 def test_running_twice_creates_no_duplicates():

@@ -4,11 +4,13 @@ Reference data (sectors, the Nyaruguru and Kamonyi stations, the active price sc
 from data migrations, so it exists on every database after `migrate`.
 """
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.utils import timezone
 
 from apps.deliveries.services import record_delivery
 from apps.pricing.services import get_active_price
@@ -56,8 +58,9 @@ class Command(BaseCommand):
             )
             if not created:
                 continue
+            delivery_date: date = timezone.localdate()
             for i, (weight, grade) in enumerate([("38.50", "A"), ("22.00", "B")], start=1):
-                price = get_active_price(grade)
+                price = get_active_price(grade, on=delivery_date)
                 if price is None:
                     self.stderr.write(f"No active price for grade {grade}; skipping demo delivery.")
                     continue
@@ -67,6 +70,7 @@ class Command(BaseCommand):
                     weight_kg=Decimal(weight),
                     grade=grade,
                     price_entry=price,
+                    delivered_on=delivery_date,
                     client_reference=f"demo-{code}-{i}",
                 )
 

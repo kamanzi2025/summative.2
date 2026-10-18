@@ -81,7 +81,7 @@ class CoordinateField(serializers.DecimalField):
 
 
 class CommercialTermField(serializers.DecimalField):
-    """Price paid to the farmer; removed for roles without commercial terms (the auditor)."""
+    """Recorded price or amount due; removed for roles without commercial terms (the auditor)."""
 
     def __init__(self, **kwargs: Any) -> None:
         kwargs.setdefault("read_only", True)

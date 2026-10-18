@@ -1,9 +1,10 @@
 # Kawa Network API
 
 Backend for the Kawa Network coffee cooperative. It registers farmers and their plots, records
-cherry deliveries at washing stations (starting with Nyaruguru), pays farmers from the active
-season's price schedule, and checks every plot against an external deforestation-risk registry
-**in the background**, so a slow or broken registry never stops a farmer being paid.
+cherry deliveries at washing stations (starting with Nyaruguru), calculates the amount due from
+the price schedule effective on the delivery date, and checks every plot against an external
+deforestation-risk registry **in the background**, so a slow or broken registry never blocks
+delivery recording. Payment execution is outside this API.
 
 This repository covers the Formative 1 (F1) and Formative 2 (F2) milestones of the `2793` Advanced
 Python assessment, and continues into the Summative. F2 retrofits authentication, role-based access
@@ -50,7 +51,7 @@ flowchart LR
 | `config/` | Settings (all read from env), URL root, `celery.py` |
 | `apps/core/` | Error envelope (`exceptions.py`), cursor pagination (`pagination.py`), JSON logging, `/api/status/`, `seed_demo` command |
 | `apps/registry/` | `Sector`, `WashingStation`, `Farmer`, `Plot`, `RiskCheckAttempt`; registry client (`clients.py`); Celery tasks (`tasks.py`); services |
-| `apps/pricing/` | `PriceSchedule` / `PriceEntry` (one active schedule per season), `/api/price-schedule/` |
+| `apps/pricing/` | `PriceSchedule` / `PriceEntry` (dated active schedules), `/api/price-schedule/` |
 | `apps/deliveries/` | `Delivery` (plot-linked, price and risk snapshots, idempotency key), station feed |
 | `apps/accounts/` | F2: `UserProfile` (role + station), `ROLE_POLICIES`, permission class, `visible_to()` scoping, field rules (masking, coarsening), login endpoints, `seed_rbac_fixtures` |
 | `apps/audit/` | F2: append-only `AuditLog`, the middleware that writes it, `/api/audit-log/` |
@@ -94,9 +95,11 @@ python manage.py seed_demo           # optional: demo farmers, plots and deliver
 python manage.py runserver
 ```
 
-Then open <http://127.0.0.1:8000/api/docs/> for Swagger UI. Every endpoint except
-`/api/status/`, `/api/price-schedule/` and the two login endpoints needs a logged-in user with a
-role; see [Authentication and roles](#authentication-and-roles-f2).
+Then open <http://127.0.0.1:8000/api/docs/> for Swagger UI. `/api/status/`,
+`/api/price-schedule/`, and the login endpoints are public. Anonymous callers may also use the F1
+farmer, plot, and delivery registration POSTs; all protected reads and all requests by authenticated
+users to protected resources require an assigned role. See
+[Authentication and roles](#authentication-and-roles-f2).
 
 `seed_rbac_fixtures` is safe to run repeatedly (it updates rather than duplicates) and writes
 directly to the database, so it needs no Redis or worker. It creates `field_agent_user`
@@ -124,8 +127,8 @@ it from `.env.example`.
 | `CELERY_RESULT_BACKEND` | `redis://localhost:6379/0` | Kept for tooling. Task results are ignored because outcomes live in `RiskCheckAttempt`. |
 | `CELERY_BROKER_TRANSPORT_OPTIONS` | `{}` | JSON transport options (e.g. for the filesystem broker) |
 | `CELERY_TASK_ALWAYS_EAGER` | `False` | `True` runs tasks inline with no worker. Only for quick demos: requests then wait for the registry. |
-| `REGISTRY_API_URL` | *(empty)* | Real registry endpoint. Empty means the simulated registry (the only client in F1). |
-| `REGISTRY_API_TIMEOUT` | `30` | Seconds before a registry call counts as a `timeout` attempt |
+| `REGISTRY_API_URL` | *(empty)* | Empty selects the simulator. A non-empty URL currently fails closed until the provider's HTTP contract is confirmed. |
+| `REGISTRY_API_TIMEOUT` | `30` | Simulator call timeout; a real registry client is not enabled until its API contract is confirmed |
 | `RISK_REGISTRY_MIN_LATENCY` | `2` | Simulated registry: minimum latency (s) |
 | `RISK_REGISTRY_MAX_LATENCY` | `40` | Simulated registry: maximum latency (s) |
 | `RISK_REGISTRY_FAILURE_RATE` | `0.2` | Simulated registry: chance a call fails with 503. `1.0` forces an outage. |
@@ -198,11 +201,12 @@ registry client is mocked. What the suite covers:
 | Cursor pagination shape, `next` link, stability under inserts, query count, `EXPLAIN` uses the composite index, `since`/grade/risk/exportable filters | `tests/test_feed.py` |
 | Task success, retries, capped backoff (3 h worst case), soft time limit → `timeout` + retry, exhaustion → `unverified`, unique attempt numbers, idempotency, sweeper (including abandoned attempts), simulated registry | `tests/test_risk_checks.py` |
 | Price-schedule shape and cache header, one-active-schedule constraint, error envelope (400/404/405) | `tests/test_pricing_and_errors.py` |
-| F2: login endpoints, session and token auth, CSRF on session writes, anonymous `401` everywhere | `tests/test_auth.py` |
+| F2: login endpoints, session and token auth, CSRF on session writes, anonymous `401` on protected reads | `tests/test_auth.py` |
 | F2: `ROLE_POLICIES` (deny by default, read-only roles, matrix values), profile constraints | `tests/test_role_policies.py` |
-| F2: `seed_rbac_fixtures` values and idempotency, national-ID collision, no Celery job | `tests/test_seed_rbac_fixtures.py` |
+| F2: `seed_rbac_fixtures` values and idempotency, historical price selection; demo seed date/pricing consistency | `tests/test_seed_rbac_fixtures.py`, `tests/test_seed_demo.py` |
 | F2: permission matrix, station scoping on lists, detail routes, sub-routes, writes and replays | `tests/test_access_scoping.py` |
-| F2: sector reference points never equal a rounding of a fixture coordinate | `tests/test_sector_centroids.py` |
+| F2: auditor can read delivery metadata while `unit_price_rwf` and `amount_due_rwf` are absent | `tests/test_access_scoping.py::test_auditor_can_read_delivery_metadata_without_commercial_terms` |
+| F2: sector reference points never equal a rounding of a fixture coordinate | `tests/test_sector_reference_points.py` |
 | F2: national-ID masking, exporter coarsening (incl. nested copies), auditor without prices | `tests/test_field_rules.py` |
 | F2: one append-only audit row per protected request, never coordinates, auditor-only endpoint | `tests/test_audit_log.py` |
 
@@ -323,21 +327,25 @@ one request (for example "who saw exact coordinates?" is
 ## API reference with curl examples
 
 Base URL: `http://127.0.0.1:8000`. All bodies are JSON. Money and weights are **decimal strings**,
-never floats. Since F2, every request below except status and the price schedule needs
-`-H "Authorization: Token $TOKEN"` (or a session); the examples assume a **field agent** at
-Nyaruguru, the role that registers farmers, plots and deliveries. The "Roles" column says who may
-call each endpoint (R read, W write).
+never floats. Protected reads require `-H "Authorization: Token $TOKEN"` (or a session).
+Registration POSTs for farmers, plots and deliveries also permit anonymous F1 callers, with no
+national ID, sector reference coordinates, and no commercial terms in responses. These writes do
+not grant access to subsequent reads. An authenticated account without an active, valid role
+profile receives `403` on protected resource reads and writes. Assigned roles follow the matrix in
+[docs/RBAC_MATRIX.md](docs/RBAC_MATRIX.md), including field-agent station scoping. The examples
+assume a **field agent** at Nyaruguru. The "Roles" column says who may call each endpoint (R read,
+W write).
 
 | Method | Path | Purpose | Roles |
 |---|---|---|---|
-| GET | `/api/status/` | Liveness | public |
+| GET | `/api/status/` | Database-dependent API status and risk-check backlog | public |
 | POST | `/api/auth/staff-login/`, `/api/auth/api-token/` | Log in (session / token) | public |
-| POST, GET | `/api/farmers/` | Register / list farmers | agent RW; exporter, auditor R |
+| POST, GET | `/api/farmers/` | Register / list farmers | anonymous W; agent RW; exporter, auditor R |
 | GET | `/api/farmers/{id}/` | One farmer | all three roles R |
-| POST, GET | `/api/plots/` | Register a plot (async risk check) / list with filters | agent RW; exporter, auditor R |
+| POST, GET | `/api/plots/` | Register a plot (async risk check) / list with filters | anonymous W; agent RW; exporter, auditor R |
 | GET | `/api/plots/{id}/` | One plot | all three roles R |
 | GET | `/api/plots/{id}/risk-checks/` | Registry attempt history for a plot | all three roles R |
-| POST, GET | `/api/deliveries/` | Record a delivery (idempotent) / delivery feed | agent RW; exporter, auditor R |
+| POST, GET | `/api/deliveries/` | Record a delivery (idempotent) / delivery feed | anonymous W; agent RW; exporter, auditor R |
 | GET | `/api/deliveries/{id}/` | One delivery | all three roles R |
 | GET | `/api/stations/`, `/api/stations/{id}/` | Washing stations | all three roles R |
 | GET | `/api/stations/{id}/deliveries/` | One station's delivery feed | all three roles R |
@@ -358,10 +366,12 @@ curl -s http://127.0.0.1:8000/api/status/
                  "last_attempt_at": "2026-09-29T18:29:51.120Z", "healthy": true}}
 ```
 
-`status` is the liveness answer and stays `"ok"` whenever the API can serve requests. A registry or
-worker problem must not make a load balancer pull a healthy API. `risk_checks` is the queue's
-health: if the worker or beat dies, `stale` grows (plots with no attempt in
-`RISK_CHECK_STALE_HOURS`) and `healthy` turns `false`, which is what monitoring should alert on.
+`/api/status/` is public and database-dependent: producing the backlog snapshot queries the
+database. `status: "ok"` means the API handled the request and that query succeeded. A registry,
+broker, or worker outage does not directly change that value. `risk_checks.healthy` means the
+backlog calculation found no plots beyond the configured staleness threshold; it is an indirect
+signal, not a Redis or Celery worker ping. A stopped worker may not be visible until work becomes
+stale, and this endpoint is not a full dependency-readiness check.
 
 ### Register a farmer
 
@@ -432,7 +442,8 @@ curl -s http://127.0.0.1:8000/api/plots/11/risk-checks/ -H "Authorization: Token
 ### Record a delivery
 
 The station must be the plot's station. `delivered_on` defaults to today and cannot be in the
-future. The price comes from the active schedule **at recording time** and is snapshotted.
+future. The price comes from the schedule effective on `delivered_on` and is snapshotted when the
+request is recorded.
 `client_reference` is the phone's idempotency key (optional, unique per station).
 
 ```bash
@@ -500,7 +511,7 @@ defence.
 | 400 | `validation_error` | Field or cross-field rule failed (`details` maps field → messages) |
 | 400 | `parse_error` | Malformed JSON |
 | 401 | `not_authenticated` / `authentication_failed` | No credentials, or an invalid token (header `WWW-Authenticate: Token`) |
-| 403 | `permission_denied` | Logged in, but the role may not do this (or the user has no role); also a session write without a CSRF token |
+| 403 | `permission_denied` | Authenticated user has no valid assigned role, or the assigned role may not do this; also a session write without a CSRF token |
 | 404 | `not_found` | Unknown id or route, **or a record outside a field agent's station** (never `403`, so its existence is not confirmed), e.g. `{"error": {"code": "not_found", "message": "No Farmer matches the given query.", "details": {}}}` |
 | 405 | `method_not_allowed` | e.g. `DELETE /api/price-schedule/` |
 | 409 | `conflict` | A natural key (`member_number`, `plot_code`, or a station's `client_reference`) was reused with different details (`details.mismatched_fields`), or two requests raced past validation into a DB uniqueness constraint |
@@ -522,7 +533,7 @@ phone often resends a request whose response it never received, so:
 `GET /api/deliveries/` and `GET /api/stations/{id}/deliveries/` return the same slim rows, newest
 first. Filters: `washing_station` (name, on `/api/deliveries/`), `grade`, `risk_status` (the plot's
 *current* status), `exportable` (`true`/`false`), and `since` (ISO datetime, strictly newer than
-`recorded_at`). The review list of paid-but-flagged cherry is
+`recorded_at`). The review list of recorded-but-flagged cherry is
 `?exportable=false&risk_status=flagged`. Use `page_size`
 to change the page length (default 20, maximum 100).
 
@@ -572,8 +583,16 @@ Cache-Control: public, max-age=60
 schedule from the database, so a price change (or activating a new schedule with
 `apps.pricing.services.activate_schedule`) is served by the very next request. The only caching is
 the `Cache-Control: max-age=60` header, so a client or proxy may show the old prices for **at most
-60 seconds** (`PRICE_SCHEDULE_MAX_AGE_SECONDS`). Delivery pricing never uses a cached value; it is
-read from the database when each delivery is recorded.
+60 seconds** (`PRICE_SCHEDULE_MAX_AGE_SECONDS`). A future-dated schedule can be activated in
+advance; the previous schedule remains effective until the new schedule's `effective_from` date.
+Delivery pricing never uses a cached value; it selects the schedule effective on `delivered_on`
+and stores that price on the delivery when the request is recorded.
+
+**Pricing assumption:** active schedules form one global effective-date timeline across season
+labels; `season` is descriptive, not a separate price-selection boundary. The latest active
+`effective_from` date on or before the delivery date wins. An active schedule cannot share its
+effective date with another active schedule, regardless of season. This is the project's chosen
+domain assumption; the F1/F2/Summative contracts do not define cross-season precedence.
 
 ## Performance: the station delivery feed
 
@@ -581,7 +600,8 @@ read from the database when each delivery is recorded.
 [ADR-002](ADR.md#adr-002-whose-performance-problem-to-solve-first-the-station-delivery-feed).
 
 - **Why cursor, not offset.** During the harvest peak, Nyaruguru records about 400 deliveries a
-  day, and they land at the top of the feed while Emmanuel is scrolling. With `?page=2` (offset),
+  day (a volume estimate, not a concurrency specification), and they land at the top of the feed
+  while Emmanuel is scrolling. With `?page=2` (offset),
   every new row pushes older rows down a page, so he sees duplicates or misses rows. `OFFSET n`
   also makes the database read and throw away `n` rows, so later pages get slower as the table
   grows. A cursor (`WHERE (recorded_at, id) < last seen … LIMIT 20`) is stable under inserts and
@@ -614,8 +634,9 @@ read from the database when each delivery is recorded.
   column, so it adds no query.
 - **No `COUNT(*)`.** Cursor pagination does not count the table, unlike page-number pagination.
 - **Small payloads for 2G.** The feed serializer is flat (no nested plot or farmer objects).
-  **Measured:** one page of 20 deliveries is **6,316 bytes** (about 315 bytes per row). With
-  `GZipMiddleware` it travels as **832 bytes**.
+  Reproducible local benchmark runs measure a 20-row page at **8,774 bytes raw** and have recorded
+  **684–747 bytes gzip** for synthetic data. See [the benchmark assumptions and results](docs/PERFORMANCE_BENCHMARK.md);
+  it measures one sequential agent session on temporary SQLite and is not a concurrent capacity claim.
 - **Incremental sync.** `?since=` lets the phone download only rows newer than the newest one it
   has.
 
@@ -625,8 +646,9 @@ See **[ADR.md](ADR.md)** for:
 
 - **ADR-001, accept-then-verify:** why the deforestation-risk check is an asynchronous, retried
   status on the plot, why deliveries are never blocked by it, and the policy for plots whose check
-  never succeeds (deliveries accepted and paid, snapshotted, non-exportable until `clear`, flagged
-  deliveries surfaced for review, manual review after 7 days `unverified`).
+  never succeeds (deliveries are recorded with payment snapshots, remain non-exportable until
+  `clear`, and flagged deliveries are surfaced for review, with manual review after 7 days
+  `unverified`). Payment execution is outside this API.
 - **ADR-002:** why Emmanuel's feed was optimised before the pricing path.
 - **ADR-003:** why every create is idempotent on its natural key, and why that beats an
   `Idempotency-Key` header or plain `400`s for 2G retries.
@@ -637,13 +659,16 @@ Other decisions worth knowing:
   keeps the provenance chain export lot → delivery → plot → land intact.
 - **Snapshots:** `unit_price_rwf`, `amount_due_rwf` and `plot_risk_status_at_delivery` are copied
   onto the delivery, so later price changes or risk verdicts never rewrite history.
-  `is_exportable` is computed from the plot's *current* status.
+  `is_exportable`, `export_status` and `export_status_reason` are computed from the plot's *current*
+  status; unknown or unverified risk is held from export.
 - **Sectors and stations are models**, referenced by name in the API. F2 scopes field agents by
-  washing station and serves exporters each sector's reference point (`Sector.centroid_latitude`,
-  `centroid_longitude`) instead of plot coordinates.
+  washing station and serves exporters each sector's reference point
+  (`Sector.reference_latitude`, `reference_longitude`) instead of plot coordinates.
 - **DB constraints back up validation:** Rwanda bounding box and area range on plots, the weight
-  range on deliveries, one active price schedule per season, one price per grade per schedule, and
-  `client_reference` unique per station.
+  range on deliveries, one active price schedule per effective date globally across season labels,
+  one price per grade per schedule, and `client_reference` unique per station. Global cross-season
+  effective-date precedence is a project assumption; the F1, F2, and Summative contracts do not
+  specify it.
 - **Idempotency (farmers, plots and deliveries):** a replay is detected before validation, so a
   retry returns the original even if prices have changed since. The replayed body must match the
   original, otherwise the response is `409`. All three resources share one implementation, `NaturalKeyReplayMixin` in
@@ -722,4 +747,15 @@ Disclosure: The F1 commits that received Claude assistance include a Co-Authored
 **Disclosure:**
 
 All F2 commits were produced with Claude's assistance. The eight commits `ec43c22` to `0a2fe7b` do not carry a `Co-Authored-By` trailer, unlike the F1 commits. Their messages were drafted without one. This was an oversight, not an attempt to conceal AI assistance. The subsequent documentation commit carries the trailer.
+
+### Summative assistance record
+
+OpenAI Codex assisted in this local Summative hardening session. It updated factual bug,
+deployment, performance, and ADR descriptions; corrected payment and sector-reference wording;
+added regression coverage for auditor delivery metadata, JSON logging, and broker-credential
+redaction; added a reproducible local feed benchmark and HTTP smoke check; and ran local
+validation commands. It made narrow factual wording corrections in `DECISION_LOG.md` without
+supplying personal reasoning. It made no Git history changes and performed no deployment. The student
+should review these changes and remains responsible for personal trade-off reasoning and the oral
+defense.
 

@@ -29,6 +29,8 @@ class DeliverySerializer(PolicyFieldsMixin, ScopedRelationsMixin, serializers.Mo
     farmer_name = serializers.CharField(source="plot.farmer.full_name", read_only=True)
     season = serializers.CharField(source="price_schedule.season", read_only=True)
     is_exportable = serializers.BooleanField(read_only=True)
+    export_status = serializers.CharField(read_only=True)
+    export_status_reason = serializers.CharField(read_only=True)
     unit_price_rwf = CommercialTermField(max_digits=10, decimal_places=2, help_text=COMMERCIAL_HELP)
     amount_due_rwf = CommercialTermField(max_digits=12, decimal_places=2, help_text=COMMERCIAL_HELP)
 
@@ -50,6 +52,8 @@ class DeliverySerializer(PolicyFieldsMixin, ScopedRelationsMixin, serializers.Mo
             "amount_due_rwf",
             "plot_risk_status_at_delivery",
             "is_exportable",
+            "export_status",
+            "export_status_reason",
             "recorded_at",
         ]
         read_only_fields = [
@@ -88,7 +92,11 @@ class DeliverySerializer(PolicyFieldsMixin, ScopedRelationsMixin, serializers.Mo
                     ]
                 }
             )
-        price_entry = get_active_price(attrs["grade"])
+        delivered_on = attrs.get("delivered_on", timezone.localdate())
+        # Persist the exact date used for price selection; the model default would be evaluated
+        # separately and could cross Kigali midnight between serializer validation and save.
+        attrs["delivered_on"] = delivered_on
+        price_entry = get_active_price(attrs["grade"], on=delivered_on)
         if price_entry is None:
             raise serializers.ValidationError(
                 {"grade": [f"No active price for grade {attrs['grade']}; the station cannot pay for this delivery."]}
@@ -104,6 +112,8 @@ class DeliveryFeedSerializer(PolicyFieldsMixin, serializers.ModelSerializer):
     plot_code = serializers.CharField(source="plot.plot_code", read_only=True)
     farmer_name = serializers.CharField(source="plot.farmer.full_name", read_only=True)
     is_exportable = serializers.BooleanField(read_only=True)
+    export_status = serializers.CharField(read_only=True)
+    export_status_reason = serializers.CharField(read_only=True)
     amount_due_rwf = CommercialTermField(max_digits=12, decimal_places=2, help_text=COMMERCIAL_HELP)
 
     class Meta:
@@ -121,5 +131,7 @@ class DeliveryFeedSerializer(PolicyFieldsMixin, serializers.ModelSerializer):
             "delivered_on",
             "recorded_at",
             "is_exportable",
+            "export_status",
+            "export_status_reason",
         ]
         read_only_fields = fields

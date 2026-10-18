@@ -6,10 +6,11 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from django.db import IntegrityError, transaction
-from django.db.models import QuerySet
+from django.db.models import Count, IntegerField, OuterRef, QuerySet, Subquery, Value
+from django.db.models.functions import Coalesce
 
 from apps.pricing.models import PriceEntry
-from apps.registry.models import Plot, WashingStation
+from apps.registry.models import Plot, RiskCheckAttempt, WashingStation
 
 from .models import Delivery, DeliveryQuerySet
 
@@ -20,7 +21,18 @@ CENT = Decimal("0.01")
 
 def feed_queryset() -> DeliveryQuerySet:
     # One JOINed query per page: the feed serializer reads plot, farmer and station names.
-    return Delivery.objects.select_related("plot__farmer", "washing_station").order_by("-recorded_at", "-id")
+    attempt_count = (
+        RiskCheckAttempt.objects.filter(plot_id=OuterRef("plot_id"))
+        .order_by()
+        .values("plot_id")
+        .annotate(n=Count("pk"))
+        .values("n")
+    )
+    return (
+        Delivery.objects.select_related("plot__farmer", "washing_station")
+        .annotate(risk_check_attempt_count=Coalesce(Subquery(attempt_count), Value(0), output_field=IntegerField()))
+        .order_by("-recorded_at", "-id")
+    )
 
 
 def find_replay(
@@ -72,10 +84,11 @@ def record_delivery(
     delivered_on: date | None = None,
     client_reference: str | None = None,
 ) -> tuple[Delivery, bool]:
-    """Create a delivery, snapshotting today's price and the plot's current risk status.
+    """Create a delivery, snapshotting the supplied date's price and current plot risk status.
 
-    Deliveries are accepted whatever the plot's risk status: the farmer is paid the same day,
-    and export eligibility is decided later from the plot's status (see ADR.md).
+    Deliveries are accepted whatever the plot's risk status. The API records a payment snapshot
+    without waiting for the registry; it does not execute payment. Export eligibility is decided
+    later from the plot's status (see ADR.md).
     Returns (delivery, created); created is False when the idempotency key was already used.
     """
     unit_price = price_entry.price_per_kg_rwf

@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -7,6 +8,7 @@ from django.utils import timezone
 from apps.deliveries.models import Delivery
 from apps.deliveries.serializers import DeliverySerializer
 from apps.pricing.models import PriceEntry, PriceSchedule
+from apps.pricing.services import activate_schedule
 from apps.registry.models import Plot, RiskStatus
 
 pytestmark = pytest.mark.django_db
@@ -21,7 +23,7 @@ def test_delivery_snapshots_price_and_risk_status(agent_api, delivery_payload):
     assert body["season"] == "2026A"
     assert body["washing_station"] == "Nyaruguru"
     assert body["plot_risk_status_at_delivery"] == "pending"
-    # Accepted and paid, but not exportable until the plot is cleared.
+    # Accepted with an amount-due snapshot, but not exportable until the plot is cleared.
     assert body["is_exportable"] is False
 
 
@@ -29,6 +31,43 @@ def test_later_price_change_does_not_rewrite_amount_due(agent_api, delivery_payl
     delivery_id = agent_api.post("/api/deliveries/", delivery_payload, format="json").json()["id"]
     PriceEntry.objects.filter(grade="A").update(price_per_kg_rwf=Decimal("900.00"))
     assert agent_api.get(f"/api/deliveries/{delivery_id}/").json()["amount_due_rwf"] == "29260.00"
+
+
+def test_late_synced_delivery_uses_price_effective_on_delivery_date(agent_api, delivery_payload):
+    current = PriceSchedule.objects.get(is_active=True)
+    old_price = current.entries.get(grade="A").price_per_kg_rwf
+    effective_on = timezone.localdate() - timedelta(days=1)
+    future_price = PriceSchedule.objects.create(
+        season="2026B",
+        effective_from=effective_on,
+    )
+    PriceEntry.objects.bulk_create(
+        PriceEntry(
+            schedule=future_price,
+            grade=entry.grade,
+            price_per_kg_rwf=Decimal("900.00") if entry.grade == "A" else entry.price_per_kg_rwf,
+        )
+        for entry in current.entries.all()
+    )
+    activate_schedule(future_price)
+
+    # A late sync for a delivery before the new effective date keeps the old rate.
+    delivery_payload["delivered_on"] = (effective_on - timedelta(days=1)).isoformat()
+    before = agent_api.post("/api/deliveries/", delivery_payload, format="json")
+    assert before.status_code == 201, before.content
+    assert before.json()["unit_price_rwf"] == str(old_price)
+
+    # The same date boundary selects the globally effective schedule, whatever its season label.
+    delivery_payload["delivered_on"] = effective_on.isoformat()
+    on_effective_date = agent_api.post("/api/deliveries/", delivery_payload, format="json")
+    assert on_effective_date.status_code == 201, on_effective_date.content
+    assert on_effective_date.json()["unit_price_rwf"] == "900.00"
+
+    # A delivery processed after the update also uses the new rate for its delivery date.
+    delivery_payload["delivered_on"] = timezone.localdate().isoformat()
+    after = agent_api.post("/api/deliveries/", delivery_payload, format="json")
+    assert after.status_code == 201, after.content
+    assert after.json()["unit_price_rwf"] == "900.00"
 
 
 def test_delivery_becomes_exportable_once_plot_clears(agent_api, delivery_payload):
@@ -44,6 +83,38 @@ def test_flagged_plot_delivery_is_recorded_but_not_exportable(agent_api, make_pl
     body = agent_api.post("/api/deliveries/", delivery_payload, format="json").json()
     assert body["plot_risk_status_at_delivery"] == "flagged"
     assert body["is_exportable"] is False
+
+
+@pytest.mark.parametrize(
+    ("risk_status", "expected_status", "reason_fragment"),
+    [
+        (RiskStatus.CLEAR, "eligible", "clear"),
+        (RiskStatus.PENDING, "held", "pending"),
+        (RiskStatus.FLAGGED, "rejected", "flagged"),
+        (RiskStatus.UNVERIFIED, "held", "unverified"),
+    ],
+)
+def test_export_status_explains_current_plot_risk_status(
+    agent_api, make_plot, delivery_payload, risk_status, expected_status, reason_fragment
+):
+    delivery_payload["plot"] = make_plot(risk_status=risk_status).pk
+    body = agent_api.post("/api/deliveries/", delivery_payload, format="json").json()
+
+    assert body["export_status"] == expected_status
+    assert reason_fragment in body["export_status_reason"].lower()
+    assert body["is_exportable"] is (risk_status == RiskStatus.CLEAR)
+
+
+def test_unverified_export_reason_includes_registry_attempt_count(agent_api, make_plot, delivery_payload):
+    plot = make_plot(risk_status=RiskStatus.UNVERIFIED)
+    plot.risk_checks.create(attempt_number=1, outcome="error", error_message="unavailable")
+    plot.risk_checks.create(attempt_number=2, outcome="timeout", error_message="timed out")
+    delivery_payload["plot"] = plot.pk
+
+    body = agent_api.post("/api/deliveries/", delivery_payload, format="json").json()
+
+    assert body["export_status"] == "held"
+    assert "registry unavailable after 2 attempts" in body["export_status_reason"].lower()
 
 
 def test_idempotent_replay_returns_original(agent_api, delivery_payload):
@@ -118,6 +189,37 @@ def test_delivered_on_defaults_to_today(agent_api, delivery_payload):
     del delivery_payload["delivered_on"]
     body = agent_api.post("/api/deliveries/", delivery_payload, format="json").json()
     assert body["delivered_on"] == timezone.localdate().isoformat()
+
+
+def test_default_delivery_date_is_the_same_date_used_for_price_selection(agent_api, delivery_payload):
+    current = PriceSchedule.objects.get(is_active=True)
+    today = timezone.localdate()
+    tomorrow = today + timedelta(days=1)
+    future = PriceSchedule.objects.create(season=current.season, effective_from=tomorrow)
+    PriceEntry.objects.bulk_create(
+        PriceEntry(
+            schedule=future,
+            grade=entry.grade,
+            price_per_kg_rwf=Decimal("900.00") if entry.grade == "A" else entry.price_per_kg_rwf,
+        )
+        for entry in current.entries.all()
+    )
+    activate_schedule(future)
+    del delivery_payload["delivered_on"]
+
+    # Model defaults are separately evaluated at save time; simulate the request crossing midnight.
+    date_field = Delivery._meta.get_field("delivered_on")
+    with (
+        patch("apps.deliveries.serializers.timezone.localdate", return_value=today),
+        patch.object(date_field, "default", return_value=tomorrow) as model_date_default,
+    ):
+        response = agent_api.post("/api/deliveries/", delivery_payload, format="json")
+
+    assert response.status_code == 201, response.content
+    body = response.json()
+    assert body["delivered_on"] == today.isoformat()
+    assert body["unit_price_rwf"] == str(current.entries.get(grade="A").price_per_kg_rwf)
+    model_date_default.assert_not_called()
 
 
 def test_replay_with_different_body_is_a_conflict(agent_api, delivery_payload):

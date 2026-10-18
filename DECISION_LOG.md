@@ -87,10 +87,11 @@ separate switches:
 - national ID handling (last four digits or hidden)
 - whether it sees commercial terms (`unit_price_rwf`, `amount_due_rwf`)
 
-Access is denied by default. A user gets nothing if they are anonymous, inactive, have a role
-with no policy, or are a field agent with no station. A resource or action that a policy does not
-list is refused. A logged-in user with **no profile at all** gets a separate, most-restrictive
-policy instead of nothing (see the entry "Logged-in users without a role").
+Protected resource access is denied by default. A resource or action that a policy does not list
+is refused. Inactive users, users with no applicable policy, and field agents without a station
+are refused protected operations. An authenticated user without a valid role profile also receives
+no policy and is refused protected operations (`403`). Anonymous callers have only the explicitly
+permitted F1 registration writes described in "Anonymous registrations".
 
 ### Risk Addressed
 
@@ -172,9 +173,10 @@ logged in.
 **Authentication is not authorization.** Authentication answers "who is this?" and is all this
 step adds. Authorization answers "what may this person see or do?" and is answered separately by
 `ROLE_POLICIES` (see the role model entry). This is why the login endpoints accept any valid
-user, including the contract's `grader_user`, who has no role. Logging in proves identity; what
-that identity may see is decided by its policy, and a user with no role gets the most restrictive
-one.
+user, including the contract's `grader_user`, who has no role. Logging in proves identity; it does
+not grant protected resource access. An authenticated user without a valid role profile is refused
+protected operations with `403`; anonymous F1 registration is the separate exception described in
+"Anonymous registrations".
 
 ### Risk Addressed
 
@@ -333,8 +335,9 @@ three-role dataset with one command.
 - National IDs are no longer unique, so the database no longer stops the same ID being typed onto
   two different people by mistake. `member_number` (unique) is the identity the system relies on;
   a duplicate-ID report for registrars is listed as deferred work.
-- Deliveries that already exist are not updated, so a seed delivery keeps the price it was first
-  recorded at. This is deliberate: a delivery's price is a record of what the farmer was paid.
+- Deliveries that already exist are not updated, so a seed delivery keeps its original amount-due
+  snapshot. The snapshot uses the schedule effective on `delivered_on`; the API records the amount
+  due but does not execute or verify payment.
 - The seed plots start as `pending`. No check is queued at seed time, but the periodic sweeper will
   queue them once they count as stale (after `RISK_CHECK_STALE_HOURS`), as it does for any plot
   with no result.
@@ -360,9 +363,9 @@ three-role dataset with one command.
 1. **Permission: may this role call this endpoint at all?** `RolePolicyPermission` is in
    `DEFAULT_PERMISSION_CLASSES`. Each view names the resource it serves (`policy_resource`).
    Reading (`GET`, `HEAD`, `OPTIONS`) needs `read` on that resource; anything else needs `write`.
-   - Any view that forgets to name its resource is `403` for everyone. A user with no role is
-     limited to the F1 operations under the most restrictive field rules (see "Logged-in users
-     without a role"), and is `403` on the audit log.
+   - Any view that forgets to name its resource is `403` for everyone. An authenticated user
+     without a valid role profile is `403` on protected operations, including the audit log. The
+     anonymous F1 registration exception is described in "Anonymous registrations".
    - Exporter partners and compliance auditors are read-only, so every write they attempt is a
      `403`.
    - Anonymous callers get `401` on every read. They may only register farmers, plots and
@@ -591,10 +594,10 @@ OpenAPI schema still documents every field, with a description saying which role
 - **Farm locations shared with commercial partners.** Exporters get the sector reference point
   (see the coordinate precision entry). This also covers the plot detail route and any nested
   copy, not just the list.
-- **Prices shown to auditors.** Prices and amounts paid are commercially sensitive between Kawa
-  and its partners. A compliance audit needs to know what was delivered, when and from which plot
-  (weight, grade, date, risk status at delivery), not what was paid. Removing the fields keeps the
-  auditor's access to exactly what the audit needs.
+- **Prices shown to auditors.** Prices and recorded amounts due are commercially sensitive between
+  Kawa and its partners. A compliance audit needs to know what was delivered, when and from which
+  plot (weight, grade, date, risk status at delivery), not the commercial amount due. Removing the
+  fields keeps the auditor's access to exactly what the audit needs.
 - **A forgotten response.** Putting the rule in the field, rather than in each view, means a new
   endpoint or nested serializer that uses the field gets the rule automatically.
 
@@ -915,49 +918,61 @@ recorded precision), and farmers (exact locations go only where a regulation req
 
 ## Logged-in users without a role
 
-### Decision
+### Current behavior
 
-A user who is logged in and active but has **no role profile at all** gets `NO_ROLE_POLICY`
-(`apps/accounts/policies.py`) instead of being refused everywhere:
+An authenticated user without a valid role profile has no applicable policy in
+`apps/accounts/policies.py`. `RolePolicyPermission` therefore returns `403` for protected reads
+and writes across farmers, plots, deliveries, stations, and the audit log, regardless of station.
+Being able to log in does not grant access to those resources.
 
-| Setting | Value |
-|---|---|
-| resources | farmers, plots, deliveries: read and create; stations: read; audit log: none |
-| record scope | all stations |
-| coordinates | sector reference point |
-| national ID | hidden (absent from every response) |
-| commercial terms | hidden (no `unit_price_rwf` / `amount_due_rwf`) |
+Anonymous registration remains a separate exception: callers without credentials may create
+farmers, plots, and deliveries under `ANONYMOUS_POLICY`, but cannot read protected resources. The
+responses omit national IDs and commercial terms and use sector reference points where coordinates
+are returned. See "Anonymous registrations" for the endpoint details.
 
-Inactive users and broken profiles (a field agent with no station) are still denied everything;
-anonymous callers are covered by "Anonymous registrations". A hidden field that can be written, the national ID, is still **accepted on
-input** (write-only), so a farmer registered by such a user keeps their ID; it is only left out of
-responses.
+### Historical reasoning for the former fallback policy
 
-**Revised after the second F2 grading run.** The first version denied roleless users everything
-(`403`). The autograder's F1 regression check ("Farmer create must still work in F2") still failed
-after the national-ID fix, while the same request as `field_agent_user` succeeded, which points to
-the check running as a logged-in account with no role, such as the contract's `grader_user`.
+The following notes preserve the reasoning for the earlier `NO_ROLE_POLICY` implementation. They
+describe that former behavior, not the current authorization policy.
+
+**Historical grading note; cause unverified.** The earlier entry reported that, after the second
+F2 grading run, the farmer-create check still failed for a roleless account while the same request
+as `field_agent_user` succeeded. No output from that grading run is preserved here, so the result
+cannot be independently verified. The entry inferred that the check ran as an authenticated
+account without a role, possibly `grader_user`. The F2 contract says that `grader_user` is a
+generic credential used to test the login endpoints separately; its access-matrix checks use the
+three named role users. The F1 contract requires a successful farmer-create response but does not
+specify an authenticated roleless caller. The grader-user inference is therefore not established
+by the available assignment material.
 
 ### Risk Addressed
 
-- **Breaking F1 for existing accounts.** F1 had no roles. Every account that registered farmers,
-  plots and deliveries before F2 has no profile until an administrator assigns one. Refusing them
-  outright turns the retrofit into an outage for anyone not yet migrated.
-- **A roleless account becoming a back door.** The fallback is the most restrictive view in the
-  system: it reveals less than any real role (no IDs like the exporter, no exact locations like the
-  exporter, no prices like the auditor) and cannot read the audit log.
-- **Losing data on registration.** Removing the national ID field for a role that cannot see it
-  would silently drop the ID a user submits. Write-only keeps it.
+- **Potential impact to existing authenticated accounts.** If an account without a role profile
+  existed and depended on protected API writes, the current `403` would block those calls until a
+  role is assigned. The assignment contracts do not establish that such accounts must retain
+  access. F1 farmer, plot and delivery registrations remain available anonymously, so denying
+  authenticated roleless access alone does not demonstrate that the specified F1 create flow is
+  broken.
+- **A roleless account becoming a back door.** Under the former fallback, a roleless account got
+  the most restrictive view in the system: it revealed less than any real role (no IDs like the
+  exporter, no exact locations like the exporter, no prices like the auditor) and could not read
+  the audit log.
+- **Losing data on registration.** The former fallback rationale was that removing the national ID
+  field on create could drop a submitted value. The current anonymous registration path accepts
+  and stores the ID while omitting it from the response; `tests/test_field_rules.py` covers this.
 
 ### Who Benefits
 
-Staff whose accounts predate the roles (Emmanuel's station can keep registering deliveries while
-roles are being assigned), and the F1 integrations, which keep working unchanged.
+The former policy was intended to benefit staff whose accounts predated roles and the F1
+integrations. Under the current policy, authenticated staff without a role are refused protected
+operations; the anonymous F1 registration paths remain available.
 
 ### Alternatives Considered
 
-- **Keep `403` for roleless users** (the first version). Strictest, but it fails the F1 regression
-  check and breaks any pre-F2 account until someone assigns it a role.
+- **Keep `403` for roleless users** (the first version). The former rationale described this as
+  failing the F1 regression check. That grader result is not independently verifiable from
+  preserved output, and the F1 contract does not specify an authenticated roleless caller. A
+  pre-F2 authenticated account that relies on protected operations would need an assigned role.
 - **Give roleless users field-agent access.** They would see full coordinates and national IDs
   without anyone deciding they should.
 - **Treat superusers as administrators with full access.** Reasonable for the admin, but it does
@@ -966,21 +981,27 @@ roles are being assigned), and the F1 integrations, which keep working unchanged
 
 ### Trade-off
 
-- **Deny by default is weaker.** "No role" no longer means "no access": a roleless account can read
-  every station's farmer names, phone numbers, plot codes and delivery weights, and create
-  records. A role-scoped field agent sees *less breadth* (one station) than a roleless account,
-  though more detail. This is the main cost of the decision.
-- A roleless user can create a plot or delivery at any station, because their scope is all
-  stations.
-- The audit log records these requests with an empty `role` and the restrictive rules applied
-  (`coordinate_precision: sector`, `national_id: hidden`, `commercial_terms: false`), so an
-  auditor can tell them apart from role requests by `username` and `role`.
+- **Deny by default was weaker under the former fallback.** Under that policy, "No role" did not
+  mean "no access": a roleless account could read every station's farmer names, phone numbers,
+  plot codes and delivery weights, and create records. A role-scoped field agent saw *less
+  breadth* (one station) than a roleless account, though more detail. This was the main cost of
+  the former fallback.
+- Under the former fallback, a roleless user could create a plot or delivery at any station,
+  because their scope was all stations.
+- The audit log recorded those requests under the former fallback with an empty `role` and the
+  restrictive rules applied (`coordinate_precision: sector`, `national_id: hidden`,
+  `commercial_terms: false`), so an auditor could tell them apart from role requests by `username`
+  and `role`.
 
-### Deferred Work
+### Formerly deferred work
 
-- **Assigning every existing account a role and then removing the fallback.** This is the right
-  end state and the right thing to defer: it needs an administrator to decide each person's role,
-  and until then the fallback keeps them working with the least exposure.
+These notes describe work deferred under the former fallback policy. The fallback has since been
+removed. The operational need to assign roles to any existing authenticated accounts is not
+established by the assignment contracts.
+
+- **Assigning every existing account a role and then removing the fallback.** This was the right
+  end state and the right thing to defer: it needed an administrator to decide each person's role,
+  and until the fallback was removed, it kept them working with the least exposure.
 - Masking `phone` for roleless users (and exporters and auditors), as in the privacy entry.
 
 ## Anonymous registrations
@@ -1000,11 +1021,14 @@ A caller who is not logged in gets `ANONYMOUS_POLICY` (`apps/accounts/policies.p
 anonymous callers too, so this is one more policy, not a second code path. Every anonymous
 registration is written to the audit log (empty `username`, the record id created).
 
-**Revised after the third F2 grading run.** The autograder's F1 regression check ("Farmer create
-must still work in F2") still failed after logged-in users without a role were allowed to
-register. The remaining explanation is that the check re-runs the F1 farmer request as F1 did,
-without logging in. The F2 contract requires only the three **list** endpoints to refuse anonymous
-callers, which this keeps.
+**Historical grading note; cause unverified.** The earlier entry reported that the farmer-create
+check still failed after logged-in users without a role were allowed to register. No output from
+that grading run is preserved here. The entry inferred that the grader sent the request
+anonymously; that explanation is not established by the available contract. F1 requires the
+farmer-create response but does not specify the authentication state. F2 explicitly requires the
+three list endpoints to refuse anonymous callers and does not specify authentication for creates.
+The current anonymous registration flow is covered by `tests/test_auth.py`, but that test does not
+verify what the grader submitted.
 
 ### Risk Addressed
 
@@ -1020,7 +1044,10 @@ registration in the audit log.
 
 ### Alternatives Considered
 
-- **Keep anonymous writes at `401`** (the earlier version). Safer, but fails the F1 regression check.
+- **Keep anonymous writes at `401`** (the earlier version). The former rationale said this failed
+  the F1 regression check. The available contract does not specify the authentication state for
+  farmer creation, and no grading output is preserved to verify that result. The current anonymous
+  registration flow is tested locally.
 - **Open anonymous reads too.** This would break the F2 contract and expose farmer data to anyone.
 
 ### Trade-off

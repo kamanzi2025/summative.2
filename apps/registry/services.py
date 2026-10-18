@@ -9,6 +9,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Exists, Max, OuterRef, QuerySet
 from django.utils import timezone
+from kombu.exceptions import OperationalError
 
 from .clients import RiskAssessment
 from .models import AttemptOutcome, Farmer, Plot, RiskCheckAttempt, RiskStatus
@@ -101,8 +102,13 @@ def enqueue_risk_check(plot_id: int) -> bool:
 
     try:
         run_risk_check.delay(plot_id)
-    except Exception:  # any broker/transport failure is handled the same way
-        logger.exception("risk_check.enqueue_failed", extra={"plot_id": plot_id})
+    except OperationalError:
+        # Transport exceptions can include the broker URL, including its credentials. Keep the
+        # event useful without logging exception text or a traceback that may expose that URL.
+        logger.warning(
+            "risk_check.enqueue_failed",
+            extra={"plot_id": plot_id},
+        )
         return False
     logger.info("risk_check.enqueued", extra={"plot_id": plot_id})
     return True

@@ -13,11 +13,13 @@ from .exceptions import error_body
 
 
 class StatusView(APIView):
-    """Liveness probe, plus the risk-check backlog so a stalled worker is visible.
+    """Database-dependent API status response with a risk-check backlog snapshot.
 
-    `status` stays "ok" while the API can serve requests: a registry or worker problem must not
-    make a load balancer pull a healthy API. `risk_checks.healthy` is false when plots are stale.
-    Public, so a load balancer can probe it without credentials.
+    The handler reads the database through `risk_check_backlog()`. `status` stays "ok" when the
+    API and that database query work, even if the registry, broker, or worker is unavailable.
+    `risk_checks.healthy` only reflects whether plots have become stale; it is not a Redis or
+    Celery worker ping and is not a complete readiness signal. Public, so a monitor can call it
+    without credentials.
     """
 
     permission_classes = [AllowAny]

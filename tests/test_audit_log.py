@@ -110,11 +110,11 @@ def test_anonymous_registration_is_recorded(farmer_payload):
     assert len(row.object_ids) == 1
 
 
-def test_user_without_a_role_is_recorded_with_the_restrictive_rules(make_staff_user):
+def test_authenticated_user_without_a_role_is_recorded_as_denied(make_staff_user):
     make_staff_user(None, username="grader_user")
     row = only_new_row(lambda: client_for("grader_user").get("/api/deliveries/"))
-    assert (row.username, row.role, row.status_code) == ("grader_user", "", 200)
-    assert (row.coordinate_precision, row.national_id, row.commercial_terms) == ("sector", "hidden", False)
+    assert (row.username, row.role, row.status_code) == ("grader_user", "", 403)
+    assert (row.coordinate_precision, row.national_id, row.commercial_terms) == ("", "", None)
 
 
 def test_out_of_scope_attempt_is_recorded_with_the_id_asked_for():

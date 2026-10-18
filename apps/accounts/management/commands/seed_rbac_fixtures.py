@@ -110,10 +110,10 @@ class Command(BaseCommand):
         return plot
 
     def seed_delivery(self, plot: Plot, client_reference: str) -> None:
-        # An existing delivery is kept as is: its price is a snapshot of what the farmer was paid.
+        # An existing delivery is kept as is: its price is a snapshot of the amount due recorded.
         if find_replay(plot.washing_station.name, client_reference):
             return
-        price = get_active_price(DELIVERY_GRADE)
+        price = get_active_price(DELIVERY_GRADE, on=DELIVERED_ON)
         if price is None:
             raise CommandError(f"No active price for grade {DELIVERY_GRADE}; cannot record seed deliveries.")
         record_delivery(

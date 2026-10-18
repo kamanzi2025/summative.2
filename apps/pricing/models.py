@@ -12,7 +12,7 @@ class Grade(models.TextChoices):
 
 
 class PriceSchedule(models.Model):
-    """Per-grade farm-gate prices for one season. Only one schedule per season may be active."""
+    """Prices for one season; active schedules may be future-dated and take effect by date."""
 
     season = models.CharField(max_length=10, help_text='e.g. "2026A"')
     effective_from = models.DateField()
@@ -23,7 +23,9 @@ class PriceSchedule(models.Model):
         ordering = ["-effective_from", "-id"]
         constraints = [
             models.UniqueConstraint(
-                fields=["season"], condition=Q(is_active=True), name="one_active_schedule_per_season"
+                fields=["effective_from"],
+                condition=Q(is_active=True),
+                name="one_active_schedule_per_effective_date",
             ),
         ]
 

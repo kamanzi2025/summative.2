@@ -1,7 +1,8 @@
 """Enforcement of ROLE_POLICIES: who may call what (permission) and which rows they see (scope).
 
 Runs against the real seed_rbac_fixtures data and logs in with a Django session, the way the F2
-hidden checks do. Field-level rules (masking, coarsening, commercial terms) are not enforced yet.
+hidden checks do. Field-level rules are covered separately in field-rule tests and on the auditor
+delivery detail endpoint below.
 """
 
 from io import StringIO
@@ -76,8 +77,33 @@ def delivery_at(station):
 
 
 @pytest.mark.parametrize("path", [*LISTS, "/api/stations/"])
-def test_user_without_a_role_can_read_the_lists(grader, path):
-    assert grader.get(path).status_code == 200
+def test_authenticated_user_without_a_role_cannot_read_protected_lists(grader, path):
+    assert grader.get(path).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        lambda: f"/api/farmers/{Farmer.objects.get(member_number='KWA-F-SEED-01').pk}/",
+        lambda: f"/api/plots/{plot('KWA-SEED-K1').pk}/",  # Nyaruguru
+        lambda: f"/api/plots/{plot('KWA-SEED-M1').pk}/",  # Kamonyi
+        lambda: f"/api/deliveries/{delivery_at('Nyaruguru').pk}/",
+        lambda: f"/api/deliveries/{delivery_at('Kamonyi').pk}/",
+        lambda: f"/api/stations/{WashingStation.objects.get(name='Nyaruguru').pk}/",
+        lambda: f"/api/stations/{WashingStation.objects.get(name='Kamonyi').pk}/",
+    ],
+    ids=[
+        "farmer",
+        "own-plot",
+        "other-station-plot",
+        "own-delivery",
+        "other-station-delivery",
+        "own-station",
+        "other-station",
+    ],
+)
+def test_authenticated_user_without_a_role_cannot_read_own_or_other_station_details(grader, path):
+    assert grader.get(path()).status_code == 403
 
 
 def test_user_without_a_role_cannot_read_the_audit_log(grader):
@@ -86,40 +112,35 @@ def test_user_without_a_role_cannot_read_the_audit_log(grader):
     assert response.json()["error"]["code"] == "permission_denied"
 
 
-def test_user_without_a_role_runs_the_f1_flow_with_the_most_restrictive_view(grader, farmer_payload):
-    """The F1 contract payloads still work for a logged-in user who was never given a role, but
-    every response reveals the least: no national ID, sector points, no prices."""
-    farmer = grader.post("/api/farmers/", farmer_payload, format="json")
-    assert farmer.status_code == 201, farmer.json()
-    assert "national_id" not in farmer.json()
-    plot_body = {
-        "farmer": farmer.json()["id"],
-        "plot_code": "KWA-P-0417-A",
-        "sector": "Kigoma",
-        "washing_station": "Nyaruguru",
-        "latitude": "-2.540000",
-        "longitude": "29.710000",
-        "area_hectares": "0.42",
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/farmers/", "farmer"),
+        ("/api/plots/", "own_plot"),
+        ("/api/plots/", "other_station_plot"),
+        ("/api/deliveries/", "own_delivery"),
+        ("/api/deliveries/", "other_station_delivery"),
+    ],
+    ids=["farmer", "own-plot", "other-station-plot", "own-delivery", "other-station-delivery"],
+)
+def test_authenticated_user_without_a_role_cannot_create_records(
+    grader, path, payload, farmer_payload, plot_payload, delivery_payload
+):
+    """F1 anonymous registrations remain public; authenticated accounts need an assigned role."""
+    bodies = {
+        "farmer": farmer_payload,
+        "own_plot": plot_payload,
+        "other_station_plot": {**plot_payload, "plot_code": "KWA-P-NO-ROLE-M1", "washing_station": "Kamonyi"},
+        "own_delivery": delivery_payload,
+        "other_station_delivery": {
+            **delivery_payload,
+            "plot": plot("KWA-SEED-M1").pk,
+            "washing_station": "Kamonyi",
+        },
     }
     with patch("apps.registry.tasks.run_risk_check.delay"):
-        plot = grader.post("/api/plots/", plot_body, format="json")
-    assert plot.status_code == 201, plot.json()
-    assert (plot.json()["latitude"], plot.json()["coordinate_precision"]) != ("-2.540000", "full")
-    delivery_body = {
-        "plot": plot.json()["id"],
-        "washing_station": "Nyaruguru",
-        "weight_kg": "38.5",
-        "grade": "A",
-        "delivered_on": "2026-03-14",
-    }
-    delivery = grader.post("/api/deliveries/", delivery_body, format="json")
-    assert delivery.status_code == 201, delivery.json()
-    assert "amount_due_rwf" not in delivery.json() and "unit_price_rwf" not in delivery.json()
-    assert grader.post("/api/farmers/", farmer_payload, format="json").status_code == 200
-    for row in grader.get("/api/farmers/").json()["results"]:
-        assert "national_id" not in row
-    for row in grader.get("/api/plots/").json()["results"]:
-        assert row["coordinate_precision"] == "sector"
+        response = grader.post(path, bodies[payload], format="json")
+    assert response.status_code == 403, response.content
 
 
 @pytest.mark.parametrize("username", [EXPORTER, AUDITOR])
@@ -234,6 +255,23 @@ def test_auditor_can_read_the_other_station_feed():
     kamonyi = WashingStation.objects.get(name="Kamonyi")
     rows = session_client(AUDITOR).get(f"/api/stations/{kamonyi.pk}/deliveries/").json()["results"]
     assert {row["washing_station"] for row in rows} == {"Kamonyi"}
+
+
+def test_auditor_can_read_delivery_metadata_without_commercial_terms():
+    delivery = delivery_at("Nyaruguru")
+
+    response = session_client(AUDITOR).get(f"/api/deliveries/{delivery.pk}/")
+
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert body["id"] == delivery.pk
+    assert body["washing_station"] == "Nyaruguru"
+    assert body["plot_code"] == "KWA-SEED-K1"
+    assert body["weight_kg"] == str(delivery.weight_kg)
+    assert body["grade"] == delivery.grade
+    assert body["export_status"]
+    assert "unit_price_rwf" not in body
+    assert "amount_due_rwf" not in body
 
 
 def test_washing_station_filter_cannot_widen_the_scope(agent):

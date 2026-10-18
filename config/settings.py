@@ -6,8 +6,10 @@ Every deploy-specific value comes from the environment (or a local `.env` file c
 
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -16,9 +18,53 @@ environ.Env.read_env(BASE_DIR / ".env", overwrite=False)
 
 # --- Core -----------------------------------------------------------------------------------
 
+DJANGO_ENV: str = env("DJANGO_ENV", default="development").strip().lower()
+if DJANGO_ENV not in {"development", "production"}:
+    raise ImproperlyConfigured("DJANGO_ENV must be either 'development' or 'production'.")
+IS_PRODUCTION = DJANGO_ENV == "production"
+
 SECRET_KEY: str = env("SECRET_KEY", default="django-insecure-local-dev-only-change-me")
 DEBUG: bool = env.bool("DEBUG", default=False)
+_ALLOWED_HOSTS_VALUE = env("ALLOWED_HOSTS", default=None)
 ALLOWED_HOSTS: list[str] = env.list("ALLOWED_HOSTS", default=["127.0.0.1", "localhost", "testserver"])
+CSRF_TRUSTED_ORIGINS: list[str] = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+
+
+def _is_https_origin(origin: str) -> bool:
+    parsed_origin = urlsplit(origin)
+    return (
+        parsed_origin.scheme == "https"
+        and bool(parsed_origin.netloc)
+        and parsed_origin.path in {"", "/"}
+        and not parsed_origin.query
+        and not parsed_origin.fragment
+    )
+
+
+if IS_PRODUCTION:
+    if (
+        len(SECRET_KEY.strip()) < 50
+        or SECRET_KEY.startswith("django-insecure-")
+        or SECRET_KEY.strip().lower() in {"change-me", "replace-with-a-private-random-secret"}
+    ):
+        raise ImproperlyConfigured("Production requires a non-placeholder SECRET_KEY of at least 50 characters.")
+    if DEBUG:
+        raise ImproperlyConfigured("DEBUG must be False when DJANGO_ENV is production.")
+    if _ALLOWED_HOSTS_VALUE is None or not _ALLOWED_HOSTS_VALUE.strip() or not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS:
+        raise ImproperlyConfigured("Production requires an explicit ALLOWED_HOSTS list without wildcards.")
+    if any(not _is_https_origin(origin) for origin in CSRF_TRUSTED_ORIGINS):
+        raise ImproperlyConfigured("Production CSRF_TRUSTED_ORIGINS entries must be HTTPS origins.")
+
+# Production assumes a trusted TLS-terminating proxy that overwrites X-Forwarded-Proto and keeps
+# the application port private. Never enable this setting when clients can reach Django directly.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https") if IS_PRODUCTION else None
+SECURE_SSL_REDIRECT = IS_PRODUCTION
+SESSION_COOKIE_SECURE = IS_PRODUCTION
+CSRF_COOKIE_SECURE = IS_PRODUCTION
+# Enable HSTS only after the public TLS hostname and all subdomain behavior are confirmed.
+SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=0) if IS_PRODUCTION else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -41,7 +87,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    # JSON compresses ~8x; a 20-row feed page is ~6.3 KB raw vs ~0.8 KB gzipped on 2G.
+    # See docs/PERFORMANCE_BENCHMARK.md for reproducible, fixture-specific feed payload measurements.
     "django.middleware.gzip.GZipMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",

@@ -20,7 +20,7 @@ class Delivery(models.Model):
 
     A delivery references the *plot* (not the farmer) so every export lot traces back to land.
     Price and plot risk status are snapshotted when the delivery is recorded, so a later price
-    change or risk verdict never rewrites what the farmer was paid or what was known at the time.
+    change or risk verdict never rewrites the amount due or what was known at the time.
     """
 
     plot = models.ForeignKey(Plot, on_delete=models.PROTECT, related_name="deliveries")
@@ -67,3 +67,35 @@ class Delivery(models.Model):
     def is_exportable(self) -> bool:
         """Only cherry from plots that are currently clear may enter a traceability export."""
         return self.plot.risk_status == RiskStatus.CLEAR
+
+    @property
+    def export_status(self) -> str:
+        """Explain whether this delivery can currently be assigned to an export lot."""
+        if self.plot.risk_status == RiskStatus.CLEAR:
+            return "eligible"
+        if self.plot.risk_status == RiskStatus.FLAGGED:
+            return "rejected"
+        return "held"
+
+    @property
+    def export_status_reason(self) -> str:
+        """Expose the plot's current registry state without changing its payment snapshot."""
+        status = self.plot.risk_status
+        if status == RiskStatus.CLEAR:
+            return "The plot's risk check is clear; this delivery is eligible for export."
+        if status == RiskStatus.FLAGGED:
+            return "The plot was flagged by the risk registry; this delivery is rejected for export."
+        if status == RiskStatus.PENDING:
+            return "The plot's risk check is pending; this delivery is held from export."
+
+        if status != RiskStatus.UNVERIFIED:
+            return "The plot's risk status is unknown; this delivery is held until verified."
+
+        attempts = getattr(self, "risk_check_attempt_count", None)
+        if attempts is None:
+            attempts = self.plot.risk_checks.count()
+        if attempts:
+            return (
+                f"Registry unavailable after {attempts} attempts; this delivery is held until a successful risk check."
+            )
+        return "The plot's risk status is unverified; this delivery is held until a successful risk check."

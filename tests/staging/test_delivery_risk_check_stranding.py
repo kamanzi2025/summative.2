@@ -1,31 +1,21 @@
-"""Staging Scenario 3: deliveries stranded on a failed risk check.
+"""Staging Scenario 3: a failed risk check leaves delivery state observable.
 
-Spec (08-kawa-contracts-and-deltas.md): register a plot with the external
-registry forced to fail, record a delivery against it, then assert the
-delivery reaches a state that can be assigned to an export lot or is
-explicitly rejected with a reason. Fails when the async flow has no failure
-path, leaving the delivery indefinitely in its initial state.
-
-Written against the contract, not against this reference implementation's
-current fields: as of this session, core/tasks.check_deforestation_risk is a
-documented stub that never calls an external registry and always marks the
-risk check "unknown" -- there is no registry-failure path yet, and Delivery
-has no status field at all. This test is expected to FAIL against the
-current reference (see 08-kawa-contracts-and-deltas.md's recorded staging
-verification) -- that is real open Summative-stage work, not a test bug.
+The adapted scenario forces risk checks to fail, records a delivery, and
+asserts that the response exposes a status-like field. The current implementation
+holds deliveries from export while the plot is pending or unverified. The
+dedicated tests in tests/test_risk_check_stranding.py assert the precise fields
+and reason text. The seed's original import/collection errors are preserved in
+docs/evidence/staging_raw_output.txt.
 """
 
 # Ported from the summative/seed version (eeffead) to this project's layout. Changes, and why:
 # - Imports: `core.models` -> `apps.registry.models`.
 # - Plot payload: "Nyaruguru" is a district/station here, not a sector, so the plot is registered
 #   in sector "Kigoma" (served by the Nyaruguru station, like seed plots K1/K2) at the same spot.
-# - Making the failure real: the seed relied on REGISTRY_API_URL alone, but in tests the risk check
-#   would never run (on_commit hooks do not fire inside a test transaction and there is no
-#   worker). So the plot POST runs inside django_capture_on_commit_callbacks(execute=True) with
-#   run_risk_check.delay routed to run_risk_check.apply: the real task, its retries and its client
-#   run inline. REGISTRY_API_URL is still pointed at a refused port (as in the seed), and
-#   RISK_REGISTRY_FAILURE_RATE=1.0 makes the simulated registry fail too, so the registry fails
-#   whichever client is configured.
+# - The plot POST runs inside django_capture_on_commit_callbacks(execute=True), with
+#   run_risk_check.delay routed to run_risk_check.apply so the real task and retry path run inline.
+# - The registry wire contract is not supplied, so a configured REGISTRY_API_URL must fail closed
+#   instead of silently substituting the simulator. The failed-attempt assertion below checks this.
 # - Added a setup guard asserting the risk check really failed (every attempt an error, plot not
 #   clear), so the scenario cannot silently pass because the registry happened to answer.
 # STATUS_LIKE_FIELDS and the final assertion are unchanged.

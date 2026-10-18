@@ -73,6 +73,8 @@ def test_page_shape_and_default_page_size(agent_api, make_delivery):
         "delivered_on",
         "recorded_at",
         "is_exportable",
+        "export_status",
+        "export_status_reason",
     }
 
 

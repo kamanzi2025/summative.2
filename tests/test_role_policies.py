@@ -5,7 +5,6 @@ from django.db import IntegrityError, transaction
 from apps.accounts.models import Role, UserProfile
 from apps.accounts.policies import (
     ANONYMOUS_POLICY,
-    NO_ROLE_POLICY,
     ROLE_POLICIES,
     Action,
     CoordinatePrecision,
@@ -59,20 +58,12 @@ def test_no_user_at_all_is_denied_everything(resource, action):
 
 
 @pytest.mark.parametrize("make_user", [User.objects.create_user, User.objects.create_superuser])
-def test_logged_in_user_without_a_role_gets_the_most_restrictive_f1_policy(make_user):
+def test_logged_in_user_without_a_role_is_denied_every_resource_and_action(make_user):
     user = make_user(username="no_role", password="x")
-    assert policy_for(user) is NO_ROLE_POLICY
-    # The F1 operations still work...
-    for resource in (Resource.FARMERS, Resource.PLOTS, Resource.DELIVERIES):
-        assert can(user, resource, Action.READ) and can(user, resource, Action.WRITE)
-    # ...but nothing sensitive is revealed, and the audit log stays closed.
-    assert not can(user, Resource.AUDIT_LOG, Action.READ)
-    assert not can(user, Resource.STATIONS, Action.WRITE)
-    assert (NO_ROLE_POLICY.coordinates, NO_ROLE_POLICY.national_id, NO_ROLE_POLICY.commercial_terms) == (
-        CoordinatePrecision.SECTOR,
-        NationalIdVisibility.HIDDEN,
-        False,
-    )
+    assert policy_for(user) is None
+    for resource in Resource:
+        for action in Action:
+            assert not can(user, resource, action)
 
 
 def test_inactive_user_without_a_role_is_still_denied():

@@ -76,11 +76,24 @@ class SimulatedRiskRegistry:
         return RiskAssessment(status=status, reference=f"SIM-{plot_code}")
 
 
-def get_registry_client() -> RiskRegistryClient:
-    """Return the configured registry client.
+class UnsupportedConfiguredRegistry:
+    """Fail closed when a real registry URL is set but its wire contract is unknown."""
 
-    F1 ships only the simulator; a real HTTP client for REGISTRY_API_URL plugs in here.
+    def check_plot(self, *, plot_code: str, latitude: Decimal, longitude: Decimal) -> RiskAssessment:
+        # Do not silently substitute a simulated clearance for a configured real provider.
+        # Keep this message static: configured URLs can contain credentials and are persisted
+        # in RiskCheckAttempt.error_message and application logs.
+        raise RegistryUnavailable("real registry integration is unsupported until its API contract is confirmed")
+
+
+def get_registry_client() -> RiskRegistryClient:
+    """Choose the simulator only when no real registry URL is configured.
+
+    The provider's HTTP method, authentication and response schema are not specified in this
+    repository. A configured URL therefore fails closed instead of returning a simulated verdict.
     """
+    if settings.REGISTRY_API_URL.strip():
+        return UnsupportedConfiguredRegistry()
     return SimulatedRiskRegistry(
         min_latency=settings.RISK_REGISTRY_MIN_LATENCY,
         max_latency=settings.RISK_REGISTRY_MAX_LATENCY,

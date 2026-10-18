@@ -2,9 +2,11 @@ import datetime
 
 import pytest
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
-from apps.pricing.models import PriceSchedule
-from apps.pricing.services import activate_schedule
+from apps.core.exceptions import Conflict
+from apps.pricing.models import PriceEntry, PriceSchedule
+from apps.pricing.services import activate_schedule, get_active_price, get_active_schedule
 
 pytestmark = pytest.mark.django_db
 
@@ -41,17 +43,42 @@ def test_no_active_schedule_is_404(anon_api):
     assert response.json()["error"]["code"] == "not_found"
 
 
-def test_only_one_active_schedule_per_season():
+def test_only_one_active_schedule_per_effective_date_globally():
+    current = PriceSchedule.objects.get(is_active=True)
     with pytest.raises(IntegrityError), transaction.atomic():
-        PriceSchedule.objects.create(season="2026A", effective_from=datetime.date(2026, 5, 1), is_active=True)
+        PriceSchedule.objects.create(season="2026B", effective_from=current.effective_from, is_active=True)
 
 
-def test_activate_schedule_deactivates_previous():
+def test_activation_rejects_cross_season_schedule_with_same_effective_date():
+    current = PriceSchedule.objects.get(is_active=True)
+    duplicate_date = PriceSchedule.objects.create(season="2026B", effective_from=current.effective_from)
+
+    with pytest.raises(Conflict, match="same effective date"):
+        activate_schedule(duplicate_date)
+
+    current.refresh_from_db()
+    duplicate_date.refresh_from_db()
+    assert current.is_active is True
+    assert duplicate_date.is_active is False
+    assert get_active_schedule(on=current.effective_from).pk == current.pk
+
+
+def test_future_schedule_keeps_current_price_until_effective_date():
     old = PriceSchedule.objects.get(is_active=True)
-    new = PriceSchedule.objects.create(season="2026A", effective_from=datetime.date(2026, 5, 1))
+    today = timezone.localdate()
+    future = today + datetime.timedelta(days=10)
+    new = PriceSchedule.objects.create(season="2026B", effective_from=future)
+    PriceEntry.objects.bulk_create(
+        PriceEntry(schedule=new, grade=entry.grade, price_per_kg_rwf=entry.price_per_kg_rwf + 10)
+        for entry in old.entries.all()
+    )
     activate_schedule(new)
     old.refresh_from_db()
-    assert not old.is_active and new.is_active
+    assert old.is_active and new.is_active
+    assert get_active_schedule(on=today).pk == old.pk
+    assert get_active_schedule(on=future).pk == new.pk
+    assert get_active_price("A", on=today).schedule_id == old.pk
+    assert get_active_price("A", on=future).schedule_id == new.pk
 
 
 def test_validation_error_envelope(agent_api):

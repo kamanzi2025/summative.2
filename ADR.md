@@ -42,7 +42,9 @@ stakeholders pull in different directions:
   on 2G a request that hangs for 40 seconds usually fails and gets retried.
 - **Jeanne** wants **every farmer paid correctly, the same day they deliver**. A farmer who carries
   cherry to the scale cannot be told to come back when a server elsewhere answers, and the cherry
-  itself starts to ferment within hours.
+  itself starts to ferment within hours. This is the business requirement described for the
+  downstream payment process; this API records the delivery and amount due but does not execute or
+  verify payment.
 - **Patrick** wants **traceability data flowing to buyers before the shipping window closes**.
   Buyers need each lot traced to its plot and that plot shown not to sit on recently cleared land,
   and the registry's verdict is the evidence.
@@ -93,7 +95,10 @@ Concretely:
    progress.
 4. `POST /api/deliveries/` accepts cherry from a plot **whatever its risk status**. The
    delivery records the plot, which is the provenance link. It also snapshots:
-   - `unit_price_rwf` and `amount_due_rwf`, from the price schedule active at recording time
+   - `unit_price_rwf` and `amount_due_rwf`, from the schedule effective on the delivery's
+     `delivered_on` date, then snapshotted when the delivery is recorded. This also applies when a
+     phone syncs a late delivery. A future-effective schedule does not replace the currently
+     effective schedule before its date arrives.
    - `plot_risk_status_at_delivery`, which records what we knew when we accepted the cherry
 5. Export eligibility is computed, never stored. `is_exportable` is true only while the delivery's
    plot is currently `clear`. When a pending plot clears later, its earlier deliveries become
@@ -116,8 +121,9 @@ Call the registry inside `POST /api/plots/` and return the verdict in the respon
 
 Check asynchronously, but reject `POST /api/deliveries/` while the plot is not `clear`.
 
-- This breaks Jeanne's requirement of same-day pay. During a multi-hour outage, every new plot's
-  farmer would be turned away at the scale, and the cherry would spoil.
+- This breaks the same-day intake workflow supporting Jeanne's payment requirement. During a
+  multi-hour outage, every new plot's farmer would be turned away at the scale, and the cherry
+  would spoil.
 - It pushes stations to work around the system (paper records, recording cherry against someone
   else's cleared plot). That destroys the traceability the check exists to protect.
 - **Rejected:** it protects exports by harming farmers, and it weakens provenance in practice.
@@ -137,8 +143,9 @@ not answer.
 
 - Plot registration and delivery recording respond in milliseconds and never depend on the
   registry being up.
-- Farmers are always paid the same day, at the price in force that day. Later price changes never
-  rewrite what a farmer was owed.
+- The recorded amount due uses the schedule effective on `delivered_on`, including for late-synced
+  deliveries. Later price changes never rewrite the delivery's payment snapshot. The API records
+  the amount due; it does not itself execute or verify payment.
 - Every delivery keeps its provenance chain (delivery → plot → farmer, sector and station) from the
   first day of harvest, with a snapshot of the risk status at the time it was accepted. When
   Patrick sends data to buyers, it is complete and shows exactly what was known when.
@@ -166,9 +173,10 @@ not answer.
     exportable automatically.
   - Stuck plots are visible early (`?requires_manual_review=true`), not discovered the week the
     ship leaves.
-- **We will pay for cherry we may not be able to export.** If a plot is later `flagged`, the
-  cooperative has already paid for its cherry. This is a deliberate business trade-off (see the
-  policy below).
+- **We will record an amount due for cherry we may not be able to export.** If a plot is later
+  `flagged`, its delivery and amount-due snapshot already exist. Whether the cooperative executes
+  payment is handled outside this API. The business trade-off and export policy are described
+  below.
 - **Duplicate registry calls are still possible**, for example when a worker dies after calling the
   registry but before acknowledging the message (`acks_late` redelivers it). They are harmless,
   because the task skips settled plots and attempt numbers stay unique, but they cost registry
@@ -179,13 +187,13 @@ not answer.
 | Stakeholder | Wants (from the brief) | Impact of this decision |
 |---|---|---|
 | **Emmanuel** | To record a delivery in seconds on a bad connection | **Benefits most.** The decision removes the registry from the one moment he cannot afford to wait: the farmer at the scale. Registration and deliveries return in milliseconds on 2G. Safe retries (`client_reference`) mean a dropped connection never creates a double delivery, and a reused reference with different values is refused (`409`) rather than silently answered with the wrong delivery. |
-| **Jeanne** | Every farmer paid correctly, the same day | **Benefits strongly.** No delivery is ever refused or delayed because of the registry, and the price is snapshotted when the delivery is recorded, so same-day pay is correct even if prices change later or the registry is down all day. |
+| **Jeanne** | Every farmer paid correctly, the same day | **Benefits strongly.** No delivery is ever refused or delayed because of the registry. The recorded amount due uses the schedule effective on the delivery date, even if the phone syncs later, and later price changes do not rewrite that snapshot. The downstream process executes any payment; this API records the amount due only. |
 | **Patrick** | Traceability data flowing to buyers before the shipping window closes | **Mixed. He pays the main cost.** Provenance is complete from the first delivery, and cleared plots flow straight into exportable data. But cherry from unchecked plots is held back until the registry answers. The mitigations above (pre-harvest registration, automatic release when a plot clears, and review queues for stuck and flagged plots) exist to keep that delay away from the shipping window. |
 
 **Why Emmanuel over Jeanne:** the brief places the registry problem at Emmanuel's scale ("Emmanuel
 cannot hold a farmer at the weighing scale while it runs"), and that is exactly the step this
-decision unblocks. Jeanne's same-day pay depends on that step too, but she also relies on the
-price snapshot, which is a separate design choice.
+decision unblocks. Jeanne's same-day payment workflow depends on that step too; the delivery-date
+price selection and amount snapshot are separate behavior and do not themselves execute payment.
 
 ## Non-functional requirements
 
@@ -201,14 +209,18 @@ price snapshot, which is a separate design choice.
 Some registry checks will fail for a very long time, or permanently. The policy for those plots:
 
 1. **Deliveries are still accepted.** Deliveries from `pending` and `unverified` plots are
-   recorded and paid the same day. We never block the farmer at the scale.
+   recorded without waiting for the registry, with an amount due based on the schedule effective
+   on `delivered_on`. The API records the amount due but does not execute payment. We never block
+   the farmer at the scale.
 2. **Every delivery snapshots `plot_risk_status_at_delivery`**, so the record always shows that the
    cherry was accepted before a verdict existed.
 3. **Not exportable until cleared.** Lots from plots that are not `clear` are excluded from buyer
    traceability exports. `is_exportable` is `false` until the plot becomes `clear`, and then it
    flips to `true` for all of that plot's deliveries.
-4. **Flagged plots:** deliveries are still recorded and paid. The cherry is physically there, and
-   Jeanne requires same-day pay. These deliveries are non-exportable. They are listed at
+4. **Flagged plots:** deliveries are still recorded with their amount-due snapshot; the API does
+   not execute payment. The cherry is physically there, and Jeanne's business requirement is
+   same-day payment. These
+   deliveries are non-exportable. They are listed at
    `GET /api/deliveries/?exportable=false&risk_status=flagged` so the people preparing buyer data
    can keep them out of traceable lots and decide what happens to that cherry (for example,
    selling it outside the traceable channel).
@@ -236,7 +248,7 @@ were candidates:
   few times a season.
 - The station delivery feed (`GET /api/deliveries/`, `GET /api/stations/{id}/deliveries/`),
   which Emmanuel reads on 2G. It **grows by about 400 rows a day** at the pilot station during
-  harvest peak.
+  harvest peak, a daily-volume estimate that does not specify peak concurrency.
   New rows arrive at the top *while he is scrolling*.
 
 ## Decision
@@ -246,9 +258,12 @@ The ordering is backed by the composite index `Delivery(washing_station, -record
 Supporting choices:
 
 - A default page of 20 rows, adjustable with `?page_size=` up to a maximum of 100.
-- A slim, flat feed serializer with no nested objects. A measured page of 20 rows is
-  **6,316 bytes** (about 315 bytes a row), and `GZipMiddleware` sends it as **832 bytes** on the
-  wire.
+- A slim, flat feed serializer with no nested objects. An earlier measurement recorded a 20-row
+  page as **6,316 bytes raw / 832 bytes gzip**, but its fixture and measurement procedure were not
+  specified closely enough for a direct comparison. Reproducible local benchmark runs have
+  recorded **8,774 bytes raw** and **684–747 bytes gzip** for the synthetic data. Its workload,
+  method, and limitations are documented in `docs/PERFORMANCE_BENCHMARK.md`; it is a single-session
+  SQLite result, not a concurrent capacity or production claim.
 - `select_related("plot__farmer", "washing_station")`, so one page is **one SQL query** however
   many rows it has. A test asserts this with `django_assert_num_queries`.
 - `?since=<ISO datetime>`, so the phone fetches only rows newer than the ones it already holds.
